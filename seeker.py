@@ -26,7 +26,7 @@ class SearchConfig:
         self.mode = "filename"      # 'filename' or 'content'
         self.case_sensitive = False # Boolean
         self.hidden_files = False   # Boolean (Default False per request)
-        self.editor = "vim"         # 'vim', 'vscode', 'sublime', 'folder', 'print'
+        self.editor = "termdir"     # 'vim', 'vscode', 'sublime', 'termdir', 'folder', 'print'
         self.initial_query = ""     # For content search
 
 def check_dependencies():
@@ -59,7 +59,19 @@ def open_file(filepath, line_number=None, editor="system"):
         print(f"{filepath}:{line_number}" if line_number else filepath)
         return
 
-    # Handle OS-specific 'Open Folder' command
+    # Open folder in current terminal (Subshell)
+    if editor == "termdir":
+        folder_path = os.path.dirname(os.path.abspath(filepath))
+        shell = os.environ.get("SHELL", "/bin/bash")
+        rprint(f"[green]Opening subshell in: {folder_path}[/green]")
+        rprint("[dim](Type 'exit' to close this shell)[/dim]")
+        try:
+            subprocess.run([shell], cwd=folder_path)
+        except Exception as e:
+            rprint(f"[bold red]Error starting shell: {e}[/bold red]")
+        return
+
+    # Handle OS-specific 'Open Folder' command (GUI Explorer)
     if editor == "folder":
         folder_path = os.path.dirname(os.path.abspath(filepath))
         system_platform = platform.system()
@@ -117,7 +129,10 @@ def run_fzf(config: SearchConfig, bat_exe: str):
         # Filename search
         hidden_flag = "--hidden" if config.hidden_files else ""
         source_cmd = f"rg --files {hidden_flag} --glob '!.git/*'"
+        # Standard preview for files
         preview_cmd = f"{bat_exe} --style=numbers --color=always {{}}"
+        # Standard preview window (no scroll offset)
+        preview_opts = "right:60%:wrap"
         is_content = False
         prompt_str = "FILES> "
     else:
@@ -125,13 +140,14 @@ def run_fzf(config: SearchConfig, bat_exe: str):
         hidden_flag = "--hidden" if config.hidden_files else ""
         case_flag = "--case-sensitive" if config.case_sensitive else "--smart-case"
         
-        # If query is empty, match everything (.) so fzf can filter
         query = config.initial_query if config.initial_query else "."
         query = query.replace("'", "'\\''") # Escape quotes
         
         source_cmd = f"rg --line-number --no-heading --color=always {hidden_flag} {case_flag} '{query}'"
         # Preview highlights line {2} (file:line:content)
         preview_cmd = f"{bat_exe} --style=numbers --color=always --highlight-line {{2}} {{1}}"
+        # Preview window scrolls to line {2} and centers it (-/2)
+        preview_opts = "right:60%:wrap:+{2}-/2"
         is_content = True
         prompt_str = f"RG:'{config.initial_query}'> "
 
@@ -158,8 +174,9 @@ def run_fzf(config: SearchConfig, bat_exe: str):
     
     # 3. Key Bindings Header
     # We use --expect to catch these keys and handle them in Python (restarting the loop)
+    # Updated ^O label and Enter description
     controls = (
-        f"ACTIONS: Enter({config.editor}) | ^V(Vim) | ^X(Code) | ^T(Subl) | ^O(Folder)\n"
+        f"ACTIONS: Enter(TermDir) | ^V(Vim) | ^X(Code) | ^T(Subl) | ^O(Explorer)\n"
         f"TOGGLES: ^F(Files) | ^G(New Search) | ^S(Case) | ^H(Hidden)"
     )
 
@@ -175,7 +192,7 @@ def run_fzf(config: SearchConfig, bat_exe: str):
         # Bindings to return specific keys to Python
         "--expect=ctrl-v,ctrl-x,ctrl-o,ctrl-t,ctrl-f,ctrl-g,ctrl-s,ctrl-h",
         "--preview", preview_cmd,
-        "--preview-window", "right:60%:wrap"
+        "--preview-window", preview_opts
     ]
 
     try:
@@ -188,9 +205,6 @@ def run_fzf(config: SearchConfig, bat_exe: str):
         )
         source_proc.stdout.close()
         source_proc.wait()
-        # CRITICAL FIX: Do NOT strip() here. 
-        # Enter key is returned as an empty first line ("\nselection").
-        # Stripping it removes the empty line, causing python to think 'selection' is the key pressed.
         return result.stdout, is_content
 
     except KeyboardInterrupt:
