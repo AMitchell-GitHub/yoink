@@ -133,7 +133,7 @@ def run_fzf(config: SearchConfig, bat_exe: str):
         # Preview highlights line {2} (file:line:content)
         preview_cmd = f"{bat_exe} --style=numbers --color=always --highlight-line {{2}} {{1}}"
         is_content = True
-        prompt_str = "CONTENT> "
+        prompt_str = f"RG:'{config.initial_query}'> "
 
     # 2. Status Line Construction (With ANSI Colors for Highlighting)
     C_GREEN = "\033[1;32m"
@@ -160,7 +160,7 @@ def run_fzf(config: SearchConfig, bat_exe: str):
     # We use --expect to catch these keys and handle them in Python (restarting the loop)
     controls = (
         f"ACTIONS: Enter({config.editor}) | ^V(Vim) | ^X(Code) | ^T(Subl) | ^O(Folder)\n"
-        f"TOGGLES: ^F(Files) | ^G(Content) | ^S(Case) | ^H(Hidden)"
+        f"TOGGLES: ^F(Files) | ^G(New Search) | ^S(Case) | ^H(Hidden)"
     )
 
     fzf_cmd = [
@@ -188,7 +188,10 @@ def run_fzf(config: SearchConfig, bat_exe: str):
         )
         source_proc.stdout.close()
         source_proc.wait()
-        return result.stdout.strip(), is_content
+        # CRITICAL FIX: Do NOT strip() here. 
+        # Enter key is returned as an empty first line ("\nselection").
+        # Stripping it removes the empty line, causing python to think 'selection' is the key pressed.
+        return result.stdout, is_content
 
     except KeyboardInterrupt:
         return None, False
@@ -204,7 +207,7 @@ def parse_selection(raw_selection, is_content_search):
 def main():
     check_dependencies()
     bat_exe = get_bat_command()
-    # console = Console() # Kept in case we need to print error messages cleanly
+    console = Console()
     config = SearchConfig()
 
     # --- Defaults applied directly in Config Class ---
@@ -214,6 +217,17 @@ def main():
     # This loop keeps running fzf until an actual file action is taken
     # or the user cancels.
     while True:
+        # Prompt for query if in content mode and no query set
+        if config.mode == "content" and not config.initial_query:
+             console.clear()
+             rprint(Panel(f"[bold cyan]Content Search Mode[/bold cyan]", subtitle="Enter text to search for (ripgrep)"))
+             q = Prompt.ask("[bold green]Search Query[/bold green]")
+             if not q:
+                 # If user inputs nothing, default to all or keep empty? 
+                 # Let's default to '.' so they see something, or they can Ctrl-F back.
+                 q = "."
+             config.initial_query = q
+
         output, is_content = run_fzf(config, bat_exe)
 
         if not output:
@@ -242,7 +256,7 @@ def main():
         elif key_pressed == 'ctrl-g':
             config.mode = "content"
             # When switching to content mid-stream, we clear any specific query 
-            # and default to searching everything (.), letting fzf do the filtering.
+            # so the loop prompts for a new one.
             config.initial_query = "" 
             continue 
 
