@@ -21,9 +21,9 @@ if ! command -v python3 &> /dev/null; then
 fi
 echo -e "${GREEN}✓ Python 3 found${NC}"
 
-# 2. Check for Pip 3
-if ! command -v pip3 &> /dev/null; then
-    echo -e "${YELLOW}Warning: pip3 not found. Assuming pip is mapped to pip3...${NC}"
+# 2. Check for Pip (via module)
+if ! python3 -m pip --version &> /dev/null; then
+    echo -e "${YELLOW}Warning: 'python3 -m pip' failed. You might need to install python3-pip.${NC}"
 fi
 
 # 3. Check Binary Dependencies (Warning only, does not stop install)
@@ -55,8 +55,9 @@ if [ $MISSING_DEPS -eq 1 ]; then
 fi
 
 # 4. Install Python 'rich' library
+# We use 'python3 -m pip' to avoid 'bad interpreter' errors with broken pip3 wrappers
 echo -e "${BLUE}Installing Python 'rich' library...${NC}"
-if pip3 install rich --user; then
+if python3 -m pip install rich --user; then
     echo -e "${GREEN}✓ rich installed${NC}"
 else
     echo -e "${RED}Error: Failed to install 'rich'. Check your python/pip setup.${NC}"
