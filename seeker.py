@@ -7,28 +7,17 @@ import platform
 
 # --- Dependency Check for Python Libraries ---
 try:
-    from textual.app import App, ComposeResult
-    from textual.containers import Container, Vertical, Horizontal
-    from textual.widgets import Header, Footer, Button, RadioSet, RadioButton, Label, Switch, Select, Static, Input
-    from textual.binding import Binding
-    from textual import on
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.prompt import Prompt, Confirm
+    from rich import print as rprint
 except ImportError:
-    print("\033[91mError: Missing Python Dependency 'textual'\033[0m")
-    print("This TUI requires the Textual library. Please install it:")
-    print("  pip install textual")
+    print("\033[91mError: Missing Python Dependency 'rich'\033[0m")
+    print("This tool requires the Rich library. Please install it for Python 3:")
+    print("  pip3 install rich")
     sys.exit(1)
 
 # --- Configuration & Constants ---
-COLORS = {
-    "HEADER": "\033[95m",
-    "BLUE": "\033[94m",
-    "GREEN": "\033[92m",
-    "WARNING": "\033[93m",
-    "FAIL": "\033[91m",
-    "ENDC": "\033[0m",
-    "BOLD": "\033[1m",
-}
-
 BINARY_DEPENDENCIES = ["fzf", "rg", "bat"]
 
 class SearchConfig:
@@ -36,8 +25,8 @@ class SearchConfig:
     def __init__(self):
         self.mode = "filename"      # 'filename' or 'content'
         self.case_sensitive = False # Boolean
-        self.hidden_files = True    # Boolean
-        self.editor = "vim"         # 'vim', 'vscode', 'folder', 'print'
+        self.hidden_files = False   # Boolean (Default False per request)
+        self.editor = "vim"         # 'vim', 'vscode', 'sublime', 'folder', 'print'
         self.initial_query = ""     # For content search
 
 def check_dependencies():
@@ -51,9 +40,9 @@ def check_dependencies():
             missing.append(dep)
     
     if missing:
-        print(f"{COLORS['FAIL']}Error: Missing Binary Dependencies{COLORS['ENDC']}")
-        print(f"The following tools are required in PATH: {', '.join(missing)}")
-        print("Please install them using your package manager (brew, apt, winget, etc.).")
+        rprint("[bold red]Error: Missing Binary Dependencies[/bold red]")
+        rprint(f"The following tools are required in PATH: [yellow]{', '.join(missing)}[/yellow]")
+        rprint("Please install them using your package manager (brew, apt, winget, etc.).")
         sys.exit(1)
 
 def get_bat_command():
@@ -61,126 +50,6 @@ def get_bat_command():
     if shutil.which("bat"): return "bat"
     elif shutil.which("batcat"): return "batcat"
     return "bat"
-
-# --- TEXTUAL TUI APP ---
-
-class SeekerTUI(App):
-    """The Configuration Dashboard TUI."""
-    
-    CSS = """
-    Screen {
-        align: center middle;
-    }
-    
-    #main_container {
-        width: 60;
-        height: auto;
-        border: heavy $accent;
-        padding: 1 2;
-        background: $surface;
-    }
-
-    Label {
-        margin-top: 1;
-        color: $text-muted;
-        text-style: bold;
-    }
-
-    .section {
-        margin-bottom: 1;
-    }
-
-    #start_button {
-        width: 100%;
-        margin-top: 2;
-        background: $success;
-        color: $text;
-    }
-    
-    #query_input {
-        display: none; /* Hidden by default */
-        margin-top: 1;
-    }
-    """
-
-    BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("enter", "submit", "Start Search"),
-    ]
-
-    def __init__(self):
-        super().__init__()
-        self.search_config = None # Will store result here
-
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Container(id="main_container"):
-            yield Static("🔍 Seeker Configuration", id="title", classes="section")
-            
-            yield Label("Search Mode")
-            with RadioSet(id="mode_select"):
-                yield RadioButton("Filename Search", value=True, id="rb_filename")
-                yield RadioButton("Content Search (Grep)", id="rb_content")
-            
-            # Input only shows for Content search
-            yield Input(placeholder="Initial Grep Query...", id="query_input")
-
-            yield Label("Options")
-            with Vertical(classes="section"):
-                with Horizontal():
-                    yield Label("Case Sensitive: ", classes="switch_label")
-                    yield Switch(value=False, id="sw_case")
-                with Horizontal():
-                    yield Label("Include Hidden: ", classes="switch_label")
-                    yield Switch(value=True, id="sw_hidden")
-
-            yield Label("Default Action (Ctrl-V/X/O override this)")
-            yield Select.from_values(
-                ["vim", "vscode", "folder", "print"],
-                value="vim",
-                id="editor_select",
-                allow_blank=False
-            )
-
-            yield Button("Start Search", id="start_button", variant="success")
-        yield Footer()
-
-    @on(RadioSet.Changed, "#mode_select")
-    def on_mode_change(self, event: RadioSet.Changed) -> None:
-        """Toggle input box visibility based on mode."""
-        input_widget = self.query_one("#query_input")
-        if event.pressed.id == "rb_content":
-            input_widget.styles.display = "block"
-            input_widget.focus()
-        else:
-            input_widget.styles.display = "none"
-
-    @on(Button.Pressed, "#start_button")
-    def on_start(self) -> None:
-        self.action_submit()
-
-    def action_submit(self) -> None:
-        """Gather all settings and exit the TUI."""
-        config = SearchConfig()
-        
-        # Get Mode
-        rb_content = self.query_one("#rb_content", RadioButton)
-        config.mode = "content" if rb_content.value else "filename"
-        
-        # Get Options
-        config.case_sensitive = self.query_one("#sw_case", Switch).value
-        config.hidden_files = self.query_one("#sw_hidden", Switch).value
-        
-        # Get Editor
-        editor_select = self.query_one("#editor_select", Select)
-        config.editor = str(editor_select.value)
-        
-        # Get Query
-        if config.mode == "content":
-            config.initial_query = self.query_one("#query_input", Input).value
-
-        self.search_config = config
-        self.exit(result=config)
 
 # --- LOGIC FUNCTIONS ---
 
@@ -202,7 +71,7 @@ def open_file(filepath, line_number=None, editor="system"):
             else:  # Linux
                 subprocess.run(["xdg-open", folder_path])
         except Exception as e:
-            print(f"{COLORS['FAIL']}Error opening folder: {e}{COLORS['ENDC']}")
+            rprint(f"[bold red]Error opening folder: {e}[/bold red]")
         return
 
     # VS Code logic
@@ -211,7 +80,19 @@ def open_file(filepath, line_number=None, editor="system"):
         try:
             subprocess.run(cmd)
         except FileNotFoundError:
-            print(f"{COLORS['FAIL']}Error: 'code' command not found.{COLORS['ENDC']}")
+            rprint("[bold red]Error: 'code' command not found.[/bold red]")
+        return
+        
+    # Sublime Text logic
+    if editor == "sublime":
+        # Assumes 'subl' is in path. 
+        # Sublime syntax for opening at line is `subl file:line`
+        arg = f"{filepath}:{line_number}" if line_number else filepath
+        cmd = ["subl", arg]
+        try:
+            subprocess.run(cmd)
+        except FileNotFoundError:
+            rprint("[bold red]Error: 'subl' command not found. Install Sublime Text CLI.[/bold red]")
         return
 
     # Vim logic
@@ -223,12 +104,13 @@ def open_file(filepath, line_number=None, editor="system"):
         try:
             subprocess.call([vim_cmd] + args)
         except FileNotFoundError:
-             print(f"{COLORS['FAIL']}Error: {vim_cmd} not found.{COLORS['ENDC']}")
+             rprint(f"[bold red]Error: {vim_cmd} not found.[/bold red]")
         return
 
 def run_fzf(config: SearchConfig, bat_exe: str):
     """
     Constructs the complex shell command for fzf based on the config.
+    Returns: (output_string, is_content_mode_active)
     """
     # 1. Construct Source Command (rg)
     if config.mode == "filename":
@@ -237,23 +119,48 @@ def run_fzf(config: SearchConfig, bat_exe: str):
         source_cmd = f"rg --files {hidden_flag} --glob '!.git/*'"
         preview_cmd = f"{bat_exe} --style=numbers --color=always {{}}"
         is_content = False
+        prompt_str = "FILES> "
     else:
         # Content search
         hidden_flag = "--hidden" if config.hidden_files else ""
         case_flag = "--case-sensitive" if config.case_sensitive else "--smart-case"
+        
+        # If query is empty, match everything (.) so fzf can filter
         query = config.initial_query if config.initial_query else "."
+        query = query.replace("'", "'\\''") # Escape quotes
         
         source_cmd = f"rg --line-number --no-heading --color=always {hidden_flag} {case_flag} '{query}'"
-        # Preview highlights line {2}
+        # Preview highlights line {2} (file:line:content)
         preview_cmd = f"{bat_exe} --style=numbers --color=always --highlight-line {{2}} {{1}}"
         is_content = True
+        prompt_str = "CONTENT> "
 
-    # 2. Key Bindings Header
-    header = (
-        f"ENTER: {config.editor.upper()} | "
-        "CTRL-V: Vim | "
-        "CTRL-X: VS Code | "
-        "CTRL-O: Folder"
+    # 2. Status Line Construction (With ANSI Colors for Highlighting)
+    C_GREEN = "\033[1;32m"
+    C_YELLOW = "\033[1;33m"
+    C_DIM = "\033[2m"
+    C_RESET = "\033[0m"
+
+    mode_status = f"{C_GREEN}[FILES]{C_RESET}" if config.mode == "filename" else f"{C_GREEN}[CONTENT]{C_RESET}"
+    
+    # Highlight enabled options in Yellow, Dim disabled ones
+    if config.case_sensitive:
+        case_status = f"{C_YELLOW}[CASE:SENSITIVE]{C_RESET}"
+    else:
+        case_status = f"{C_DIM}[CASE:SMART]{C_RESET}"
+
+    if config.hidden_files:
+        hidden_status = f"{C_YELLOW}[HIDDEN:ON]{C_RESET}"
+    else:
+        hidden_status = f"{C_DIM}[HIDDEN:OFF]{C_RESET}"
+    
+    status_line = f"{mode_status}  {case_status}  {hidden_status}"
+    
+    # 3. Key Bindings Header
+    # We use --expect to catch these keys and handle them in Python (restarting the loop)
+    controls = (
+        f"ACTIONS: Enter({config.editor}) | ^V(Vim) | ^X(Code) | ^T(Subl) | ^O(Folder)\n"
+        f"TOGGLES: ^F(Files) | ^G(Content) | ^S(Case) | ^H(Hidden)"
     )
 
     fzf_cmd = [
@@ -263,8 +170,10 @@ def run_fzf(config: SearchConfig, bat_exe: str):
         "--height", "95%",
         "--layout", "reverse",
         "--border",
-        "--header", header,
-        "--expect=ctrl-v,ctrl-x,ctrl-o",
+        "--prompt", prompt_str,
+        "--header", f"{status_line}\n{controls}",
+        # Bindings to return specific keys to Python
+        "--expect=ctrl-v,ctrl-x,ctrl-o,ctrl-t,ctrl-f,ctrl-g,ctrl-s,ctrl-h",
         "--preview", preview_cmd,
         "--preview-window", "right:60%:wrap"
     ]
@@ -295,43 +204,80 @@ def parse_selection(raw_selection, is_content_search):
 def main():
     check_dependencies()
     bat_exe = get_bat_command()
+    # console = Console() # Kept in case we need to print error messages cleanly
+    config = SearchConfig()
 
-    # 1. Run the TUI to get configuration
-    app = SeekerTUI()
-    config = app.run()
+    # --- Defaults applied directly in Config Class ---
+    # No initial menu prompts
+    
+    # --- Main Event Loop ---
+    # This loop keeps running fzf until an actual file action is taken
+    # or the user cancels.
+    while True:
+        output, is_content = run_fzf(config, bat_exe)
 
-    # If user quit TUI without submitting
-    if not config:
-        sys.exit(0)
+        if not output:
+            # rprint("[yellow]Cancelled.[/yellow]")
+            sys.exit(0)
 
-    # 2. Run FZF with the config
-    output, is_content = run_fzf(config, bat_exe)
+        lines = output.splitlines()
+        if len(lines) < 2:
+            # User might have pressed a control key with no selection, 
+            # or filtered to nothing.
+            # If a control key was pressed, lines[0] will exist.
+            if len(lines) == 1:
+                key_pressed = lines[0]
+                selection_text = None
+            else:
+                sys.exit(0)
+        else:
+            key_pressed = lines[0]
+            selection_text = lines[1]
 
-    if not output:
-        print("No selection made.")
-        sys.exit(0)
+        # --- Handle Toggle/Switch Keys (Loop Continue) ---
+        if key_pressed == 'ctrl-f':
+            config.mode = "filename"
+            continue # Restart loop with new mode
+            
+        elif key_pressed == 'ctrl-g':
+            config.mode = "content"
+            # When switching to content mid-stream, we clear any specific query 
+            # and default to searching everything (.), letting fzf do the filtering.
+            config.initial_query = "" 
+            continue 
 
-    # 3. Handle Result
-    lines = output.splitlines()
-    if len(lines) < 2: sys.exit(0)
+        elif key_pressed == 'ctrl-s':
+            config.case_sensitive = not config.case_sensitive
+            continue
 
-    key_pressed = lines[0]
-    selection_text = lines[1]
-    filepath, line_num = parse_selection(selection_text, is_content)
+        elif key_pressed == 'ctrl-h':
+            config.hidden_files = not config.hidden_files
+            continue
 
-    if not filepath: sys.exit(1)
+        # --- Handle Action Keys (Loop Break) ---
+        if not selection_text:
+            continue
 
-    # 4. Determine Action
-    # Keys override the default editor setting
-    if key_pressed == 'ctrl-v':
-        open_file(filepath, line_num, "vim")
-    elif key_pressed == 'ctrl-x':
-        open_file(filepath, line_num, "vscode")
-    elif key_pressed == 'ctrl-o':
-        open_file(filepath, line_num, "folder")
-    else:
-        # User pressed Enter, use the config default
-        open_file(filepath, line_num, config.editor)
+        filepath, line_num = parse_selection(selection_text, is_content)
+        if not filepath: 
+            sys.exit(1)
+
+        if key_pressed == 'ctrl-v':
+            open_file(filepath, line_num, "vim")
+            break
+        elif key_pressed == 'ctrl-x':
+            open_file(filepath, line_num, "vscode")
+            break
+        elif key_pressed == 'ctrl-t':
+            open_file(filepath, line_num, "sublime")
+            break
+        elif key_pressed == 'ctrl-o':
+            open_file(filepath, line_num, "folder")
+            break
+        else:
+            # Default Enter key
+            open_file(filepath, line_num, config.editor)
+            break
 
 if __name__ == "__main__":
     try:
