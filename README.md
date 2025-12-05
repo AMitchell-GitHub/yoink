@@ -10,7 +10,7 @@
   - VS Code (Ctrl+X)
   - Sublime Text (Ctrl+T)
   - System File Explorer (Ctrl+O)
-  - Integrated Subshell (Enter)
+  - Change Directory (Enter)
 - **TUI Toggles:** Toggle case sensitivity and hidden files on the fly without restarting the script.
 
 # 📦 Dependencies
@@ -42,11 +42,29 @@ winget install Junegunn.fzf BurntSushi.ripgrep.MSVC sharkdp.bat Python.Python.3
 # 🚀 Installation
 You can install yoink using the provided installer script. This will check for dependencies, install the Python requirements, and move the script to your local bin.
 
-**One-Line Install (Local):**
+**1. Run the installer**
 ```
 chmod +x install.sh && ./install.sh
 ```
-After installation, simply run:
+
+**2. Enable "CD on Enter" (Important)**
+
+For Yoink to change your terminal's directory when you press Enter, you must add this shell function to your `~/.bashrc` or `~/.zshrc`:
+```
+yoink() {
+    command yoink "$@"
+    local dest="$HOME/.yoink_last_path"
+    if [ -f "$dest" ]; then
+        cd "$(cat "$dest")"
+        rm "$dest"
+    fi
+}
+```
+*Reload your shell (`source ~/.bashrc` or `source ~/.zshrc`) after adding this.*
+
+**3. All done!**
+
+You can now run:
 ```
 yoink
 ```

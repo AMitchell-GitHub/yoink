@@ -26,7 +26,7 @@ class SearchConfig:
         self.mode = "filename"      # 'filename' or 'content'
         self.case_sensitive = False # Boolean
         self.hidden_files = False   # Boolean (Default False per request)
-        self.editor = "termdir"     # 'vim', 'vscode', 'sublime', 'termdir', 'folder', 'print'
+        self.editor = "cd"          # Default to 'cd' behavior
         self.initial_query = ""     # For content search
 
 def check_dependencies():
@@ -59,16 +59,18 @@ def open_file(filepath, line_number=None, editor="system"):
         print(f"{filepath}:{line_number}" if line_number else filepath)
         return
 
-    # Open folder in current terminal (Subshell)
-    if editor == "termdir":
+    # Change Directory Mode
+    # Writes the directory to a temp file for the shell wrapper to read
+    if editor == "cd":
         folder_path = os.path.dirname(os.path.abspath(filepath))
-        shell = os.environ.get("SHELL", "/bin/bash")
-        rprint(f"[green]Opening subshell in: {folder_path}[/green]")
-        rprint("[dim](Type 'exit' to close this shell)[/dim]")
+        target_file = os.path.expanduser("~/.yoink_last_path")
         try:
-            subprocess.run([shell], cwd=folder_path)
+            with open(target_file, "w") as f:
+                f.write(folder_path)
+            # We don't print confirmation here to avoid messing up the UI flow, 
+            # the shell function will handle the jump.
         except Exception as e:
-            rprint(f"[bold red]Error starting shell: {e}[/bold red]")
+             rprint(f"[bold red]Error writing to {target_file}: {e}[/bold red]")
         return
 
     # Handle OS-specific 'Open Folder' command (GUI Explorer)
@@ -176,7 +178,7 @@ def run_fzf(config: SearchConfig, bat_exe: str):
     # We use --expect to catch these keys and handle them in Python (restarting the loop)
     # Updated ^O label and Enter description
     controls = (
-        f"ACTIONS: Enter(TermDir) | ^V(Vim) | ^X(Code) | ^T(Subl) | ^O(Explorer)\n"
+        f"ACTIONS: Enter(CD) | ^V(Vim) | ^X(Code) | ^T(Subl) | ^O(Explorer)\n"
         f"TOGGLES: ^F(Files) | ^G(New Search) | ^S(Case) | ^H(Hidden)"
     )
 
@@ -224,9 +226,14 @@ def main():
     console = Console()
     config = SearchConfig()
 
-    # --- Defaults applied directly in Config Class ---
-    # No initial menu prompts
-    
+    # Clear previous last path file if it exists so we don't accidentally CD on cancel
+    last_path_file = os.path.expanduser("~/.yoink_last_path")
+    if os.path.exists(last_path_file):
+        try:
+            os.remove(last_path_file)
+        except OSError:
+            pass
+
     # --- Main Event Loop ---
     # This loop keeps running fzf until an actual file action is taken
     # or the user cancels.
@@ -237,22 +244,16 @@ def main():
              rprint(Panel(f"[bold cyan]Content Search Mode[/bold cyan]", subtitle="Enter text to search for (ripgrep)"))
              q = Prompt.ask("[bold green]Search Query[/bold green]")
              if not q:
-                 # If user inputs nothing, default to all or keep empty? 
-                 # Let's default to '.' so they see something, or they can Ctrl-F back.
                  q = "."
              config.initial_query = q
 
         output, is_content = run_fzf(config, bat_exe)
 
         if not output:
-            # rprint("[yellow]Cancelled.[/yellow]")
             sys.exit(0)
 
         lines = output.splitlines()
         if len(lines) < 2:
-            # User might have pressed a control key with no selection, 
-            # or filtered to nothing.
-            # If a control key was pressed, lines[0] will exist.
             if len(lines) == 1:
                 key_pressed = lines[0]
                 selection_text = None
@@ -269,8 +270,6 @@ def main():
             
         elif key_pressed == 'ctrl-g':
             config.mode = "content"
-            # When switching to content mid-stream, we clear any specific query 
-            # so the loop prompts for a new one.
             config.initial_query = "" 
             continue 
 
@@ -303,7 +302,7 @@ def main():
             open_file(filepath, line_num, "folder")
             break
         else:
-            # Default Enter key
+            # Default Enter key (CD)
             open_file(filepath, line_num, config.editor)
             break
 

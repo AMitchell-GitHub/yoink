@@ -12,7 +12,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== yoink Installer ===${NC}"
+echo -e "${BLUE}=== Yoink Installer ===${NC}"
 
 # 1. Check for Python 3
 if ! command -v python3 &> /dev/null; then
@@ -84,5 +84,18 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
-echo -e "${GREEN}Success! yoink is installed.${NC}"
+echo -e "${GREEN}Success! Yoink is installed.${NC}"
 echo -e "You can now run it by typing: ${BLUE}$INSTALL_NAME${NC}"
+
+echo -e "\n${YELLOW}IMPORTANT: To enable 'CD on Enter' functionality:${NC}"
+echo -e "Copy the following function into your ${BLUE}~/.bashrc${NC} or ${BLUE}~/.zshrc${NC}:"
+echo -e "${GREEN}"
+echo "yoink() {"
+echo "    command yoink \"\$@\""
+echo "    local dest=\"\$HOME/.yoink_last_path\""
+echo "    if [ -f \"\$dest\" ]; then"
+echo "        cd \"\$(cat \"\$dest\")\""
+echo "        rm \"\$dest\""
+echo "    fi"
+echo "}"
+echo -e "${NC}"
