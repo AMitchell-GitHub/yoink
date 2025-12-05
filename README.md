@@ -1,5 +1,5 @@
-# 🔍 Seeker
-**Seeker** is a powerful, Python-based TUI wrapper around `fzf`, `ripgrep`, and `bat`. It provides a seamless interface for navigating codebases, searching for files by name, or grepping for specific content, with a built-in preview and direct integration with your favorite editors (Vim, VS Code, Sublime).
+# 🔍 yoink
+**Yoink** is a powerful, Python-based TUI wrapper around `fzf`, `ripgrep`, and `bat`. It provides a seamless interface for navigating codebases, searching for files by name, or grepping for specific content, with a built-in preview and direct integration with your favorite editors (Vim, VS Code, Sublime).
 
 
 # ✨ Features
@@ -14,7 +14,7 @@
 - **TUI Toggles:** Toggle case sensitivity and hidden files on the fly without restarting the script.
 
 # 📦 Dependencies
-Seeker requires the following binary tools to be installed and available in your system's `PATH`:
+yoink requires the following binary tools to be installed and available in your system's `PATH`:
 1. [**fzf**](https://github.com/junegunn/fzf): The fuzzy finder.
 2. [**ripgrep (rg)**](https://github.com/BurntSushi/ripgrep): The search engine.
 3. [**bat**](https://github.com/sharkdp/bat): The cat clone (used for previews).
@@ -31,7 +31,7 @@ brew install fzf ripgrep bat python
 ```
 sudo apt update
 sudo apt install fzf ripgrep bat python3 python3-pip
-# Note: On Ubuntu, 'bat' may be installed as 'batcat'. Seeker handles this automatically.
+# Note: On Ubuntu, 'bat' may be installed as 'batcat'. yoink handles this automatically.
 ```
 
 **Windows (Winget) [NOT OFFICIALLY SUPPORTED]:**
@@ -40,7 +40,7 @@ winget install Junegunn.fzf BurntSushi.ripgrep.MSVC sharkdp.bat Python.Python.3
 ```
 
 # 🚀 Installation
-You can install Seeker using the provided installer script. This will check for dependencies, install the Python requirements, and move the script to your local bin.
+You can install yoink using the provided installer script. This will check for dependencies, install the Python requirements, and move the script to your local bin.
 
 **One-Line Install (Local):**
 ```
@@ -48,7 +48,7 @@ chmod +x install.sh && ./install.sh
 ```
 After installation, simply run:
 ```
-seeker
+yoink
 ```
 # ⌨️ Usage & Keybindings
 |Key|Action|

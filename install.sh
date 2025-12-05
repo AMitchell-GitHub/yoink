@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-SCRIPT_NAME="seeker.py"
-INSTALL_NAME="seeker"
+SCRIPT_NAME="yoink.py"
+INSTALL_NAME="yoink"
 INSTALL_DIR="$HOME/.local/bin"
 
 # Colors
@@ -12,7 +12,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Seeker Installer ===${NC}"
+echo -e "${BLUE}=== yoink Installer ===${NC}"
 
 # 1. Check for Python 3
 if ! command -v python3 &> /dev/null; then
@@ -83,5 +83,5 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
-echo -e "${GREEN}Success! Seeker is installed.${NC}"
+echo -e "${GREEN}Success! yoink is installed.${NC}"
 echo -e "You can now run it by typing: ${BLUE}$INSTALL_NAME${NC}"
