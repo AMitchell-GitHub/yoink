@@ -1,82 +1,84 @@
-# 🔍 yoink
-**Yoink** is a powerful, Python-based TUI wrapper around `fzf`, `ripgrep`, and `bat`. It provides a seamless interface for navigating codebases, searching for files by name, or grepping for specific content, with a built-in preview and direct integration with your favorite editors (Vim, VS Code, Sublime).
+# yoink
 
+`yoink` is an interactive terminal search tool powered by `ripgrep`, `fzf`, and `bat`.
 
-# ✨ Features
-- **Dual Modes:** Instantly switch between Filename Search and Content Search (grep).
-- **Smart Preview:** Uses bat for syntax-highlighted previews. In content mode, it automatically scrolls to and highlights the matching line.
-- **Editor Integration:** Open results directly in:
-  - Vim (Ctrl+V)
-  - VS Code (Ctrl+X)
-  - Sublime Text (Ctrl+T)
-  - System File Explorer (Ctrl+O)
-  - Change Directory (Enter)
-- **TUI Toggles:** Toggle case sensitivity and hidden files on the fly without restarting the script.
+It searches both:
+- file/folder names (regex)
+- text inside files (regex)
 
-# 📦 Dependencies
-yoink requires the following binary tools to be installed and available in your system's `PATH`:
-1. [**fzf**](https://github.com/junegunn/fzf): The fuzzy finder.
-2. [**ripgrep (rg)**](https://github.com/BurntSushi/ripgrep): The search engine.
-3. [**bat**](https://github.com/sharkdp/bat): The cat clone (used for previews).
-It also requires **Python 3** and the [Rich library](https://github.com/Textualize/rich).
+Results are shown on the left, with a live preview on the right.
 
-**Dependency Installation**
+## Install (recommended)
 
-**macOS (Homebrew) [NOT OFFICIALLY SUPPORTED]:**
-```
-brew install fzf ripgrep bat python
+```bash
+curl -fsSL https://raw.githubusercontent.com/AMitchell-GitHub/yoink/main/scripts/install-from-release.sh | bash -s -- AMitchell-GitHub/yoink
 ```
 
-**Ubuntu/Debian:**
-```
-sudo apt update
-sudo apt install fzf ripgrep bat python3 python3-pip
-# Note: On Ubuntu, 'bat' may be installed as 'batcat'. yoink handles this automatically.
+This installs:
+- `yoink` to `~/.local/bin/yoink`
+- default config to `~/.yoinkignore` (if it does not already exist)
+
+If `yoink` is not found after install, add this to your shell config:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-**Windows (Winget) [NOT OFFICIALLY SUPPORTED]:**
-```
-winget install Junegunn.fzf BurntSushi.ripgrep.MSVC sharkdp.bat Python.Python.3
+## Requirements
+
+- `rg` (ripgrep)
+- `fzf`
+- `bat`
+
+Optional editor commands for keybinds:
+- `vim`
+- `code` (VS Code)
+- `subl` (Sublime Text)
+
+## Usage
+
+```bash
+yoink
+yoink ejectReasons
 ```
 
-# 🚀 Installation
-You can install yoink using the provided installer script. This will check for dependencies, install the Python requirements, and move the script to your local bin.
+## Keybinds
 
-**1. Run the installer**
-```
-chmod +x install.sh && ./install.sh
-```
+- `Enter`: print the containing directory of selected result
+- `Ctrl-V`: open in `vim`
+- `Ctrl-O`: open in `code`
+- `Ctrl-S`: open in `subl`
 
-**2. Enable "CD on Enter" (Important)**
+## Optional shell helper so `yoink` can `cd`
 
-For Yoink to change your terminal's directory when you press Enter, you must add this shell function to your `~/.bashrc` or `~/.zshrc`:
-```
+`yoink` prints a path; a process cannot directly change your current shell directory.
+If you want `yoink` itself to change directory, add this shell function to your `~/.zshrc` or `~/.bashrc`:
+
+```bash
 yoink() {
-    command yoink "$@"
-    local dest="$HOME/.yoink_last_path"
-    if [ -f "$dest" ]; then
-        cd "$(cat "$dest")"
-        rm "$dest"
-    fi
+  local target
+  target="$(command yoink "$@")" || return
+  [[ -n "$target" ]] && cd "$target"
 }
 ```
-*Reload your shell (`source ~/.bashrc` or `source ~/.zshrc`) after adding this.*
 
-**3. All done!**
+## Config (`~/.yoinkignore`)
 
-You can now run:
+`yoink` uses one system-wide config file at `~/.yoinkignore`.
+
+Default:
+
+```text
+include_hidden=false
+include_mounts=false
+include_symlinks=false
+
+.git/**
+node_modukes/**
 ```
-yoink
-```
-# ⌨️ Usage & Keybindings
-|Key|Action|
-|---|------|
-|Enter|Open a subshell in the file's directory (TermDir)|
-|Ctrl + V|Open in Vim|
-|Ctrl + X|Open in VS Code|
-|Ctrl + T|Open in Sublime Text|
-|Ctrl + O|Open parent folder in System Explorer|
-|Ctrl + F|Switch to Filename Search Mode|
-|Ctrl + G|Switch to Content Search Mode (New Search)|
-|Ctrl + S|Toggle Case Sensitivity|
-|Ctrl + H|Toggle Hidden Files|
+
+Behavior:
+- `include_hidden`: include dotfiles and dot-directories
+- `include_mounts`: search across mounted filesystems
+- `include_symlinks`: follow symlinks
+- Any other non-comment line is treated as an ignore glob

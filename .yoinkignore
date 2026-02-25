@@ -1,0 +1,6 @@
+include_hidden=false
+include_mounts=false
+include_symlinks=false
+
+.git/**
+node_modukes/**
