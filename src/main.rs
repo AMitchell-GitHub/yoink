@@ -6,7 +6,7 @@ mod ui;
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, InternalCommand};
-use search::{build_candidates, format_candidates};
+use search::{build_search_entries, format_search_entries};
 use std::env;
 use which::which;
 
@@ -22,14 +22,14 @@ fn run() -> Result<()> {
     match cli.internal {
         Some(InternalCommand::Search { query }) => {
             ensure_dependency("rg")?;
-            let candidates = build_candidates(&query, &cwd)?;
-            print!("{}", format_candidates(&candidates));
+            let entries = build_search_entries(&query, &cwd)?;
+            print!("{}", format_search_entries(&entries));
             return Ok(());
         }
-        Some(InternalCommand::Preview { path, query }) => {
+        Some(InternalCommand::Preview { path, query, line }) => {
             ensure_dependency("bat")?;
             ensure_dependency("rg")?;
-            return ui::run_preview(&cwd, &path, &query);
+            return ui::run_preview(&cwd, &path, &query, line);
         }
         None => {}
     }

@@ -49,6 +49,13 @@ yoink ejectReasons
 - `Ctrl-O`: open in `code`
 - `Ctrl-S`: open in `subl`
 
+Results list UX:
+- Single mono-list: file/folder rows and text-match rows together
+- Color/icon markers help quickly distinguish path hits, text hits, and mixed hits
+- Main rows stay clean (icon + path), while occurrence lines appear underneath
+- Occurrence count is shown once on the first occurrence line for each file
+- Inline occurrence rows include line number + snippet and preview jumps directly to that line
+
 ## Optional shell helper so `yoink` can `cd`
 
 `yoink` prints a path; a process cannot directly change your current shell directory.
@@ -72,6 +79,7 @@ Default:
 include_hidden=false
 include_mounts=false
 include_symlinks=false
+sort_mode=depth
 
 .git/**
 node_modukes/**
@@ -81,4 +89,5 @@ Behavior:
 - `include_hidden`: include dotfiles and dot-directories
 - `include_mounts`: search across mounted filesystems
 - `include_symlinks`: follow symlinks
+- `sort_mode`: `depth` or `alphabetical`
 - Any other non-comment line is treated as an ignore glob

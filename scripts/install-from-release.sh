@@ -55,6 +55,7 @@ if [[ ! -f "$config_path" ]]; then
 include_hidden=false
 include_mounts=false
 include_symlinks=false
+sort_mode=depth
 
 .git/**
 node_modukes/**

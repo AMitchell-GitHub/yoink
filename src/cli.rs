@@ -22,5 +22,6 @@ pub enum InternalCommand {
         path: String,
         #[arg(default_value = "")]
         query: String,
+        line: Option<usize>,
     },
 }

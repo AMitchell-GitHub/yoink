@@ -5,7 +5,7 @@ use std::process::Command;
 
 pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path) -> Result<()> {
     let exe = exe_path.to_string_lossy();
-    let preview = format!("{} __preview {{2}} {{q}}", exe);
+    let preview = format!("{} __preview {{2}} {{q}} {{3}}", exe);
     let reload = format!("{} __search {{q}}", exe);
 
     let mut command = Command::new("fzf");
@@ -14,11 +14,11 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
         .arg("--delimiter")
         .arg("\t")
         .arg("--with-nth")
-        .arg("1,2")
+        .arg("1")
         .arg("--layout=reverse")
         .arg("--height=100%")
         .arg("--header")
-        .arg("Enter: print containing directory  |  Ctrl-V: vim  |  Ctrl-O: code  |  Ctrl-S: subl")
+        .arg("Enter: cd to container  |  Ctrl-V: vim  |  Ctrl-O: code  |  Ctrl-S: subl")
         .arg("--preview-window=right:65%:wrap")
         .arg("--preview")
         .arg(preview)
@@ -56,9 +56,11 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
         return Ok(());
     }
 
-    let mut parts = selected_line.splitn(2, '\t');
-    let _tag = parts.next().unwrap_or_default();
-    let selected_rel_path = parts.next().unwrap_or_default();
+    let (selected_rel_path, _selected_line_num) = parse_selected_line(selected_line);
+
+    if selected_rel_path.is_empty() {
+        return Ok(());
+    }
 
     match key {
         "ctrl-v" => {
@@ -87,7 +89,27 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
     }
 }
 
-pub fn run_preview(cwd: &Path, selected_rel_path: &str, query: &str) -> Result<()> {
+fn parse_selected_line(selected_line: &str) -> (&str, Option<usize>) {
+    let mut parts = selected_line.splitn(3, '\t');
+    let _display = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or_default();
+    let line = parts.next().and_then(|raw| {
+        if raw.trim().is_empty() {
+            None
+        } else {
+            raw.trim().parse::<usize>().ok()
+        }
+    });
+
+    (path, line)
+}
+
+pub fn run_preview(
+    cwd: &Path,
+    selected_rel_path: &str,
+    query: &str,
+    selected_line: Option<usize>,
+) -> Result<()> {
     let full = cwd.join(selected_rel_path);
     if full.is_dir() {
         Command::new("ls")
@@ -102,7 +124,15 @@ pub fn run_preview(cwd: &Path, selected_rel_path: &str, query: &str) -> Result<(
     bat.arg("--style=numbers")
         .arg("--color=always");
 
-    if !query.trim().is_empty() {
+    if let Some(line_num) = selected_line {
+        let context = 30usize;
+        let start = if line_num > context { line_num - context } else { 1 };
+        let end = line_num + context;
+        bat.arg("--highlight-line")
+            .arg(line_num.to_string())
+            .arg("--line-range")
+            .arg(format!("{start}:{end}"));
+    } else if !query.trim().is_empty() {
         let rg_output = Command::new("rg")
             .arg("-n")
             .arg("-m")

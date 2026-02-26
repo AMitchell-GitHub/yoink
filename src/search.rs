@@ -13,6 +13,12 @@ use std::os::unix::fs::MetadataExt;
 
 const DEFAULT_IGNORE_GLOBS: &[&str] = &[".git/**", "node_modukes/**"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortMode {
+    Depth,
+    Alphabetical,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub path: PathBuf,
@@ -21,24 +27,28 @@ pub struct Candidate {
     pub content_match: bool,
 }
 
-impl Candidate {
-    pub fn tag(&self) -> &'static str {
-        match (self.path_match, self.content_match) {
-            (true, true) => "BOTH",
-            (true, false) => "PATH",
-            (false, true) => "TEXT",
-            (false, false) => "PATH",
-        }
-    }
-}
-
 #[derive(Debug)]
 struct YoinkSettings {
     include_hidden: bool,
     include_mounts: bool,
     include_symlinks: bool,
+    sort_mode: SortMode,
     globset: GlobSet,
     globs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchEntry {
+    pub display: String,
+    pub path: PathBuf,
+    pub line: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct Occurrence {
+    line: usize,
+    column: usize,
+    snippet: String,
 }
 
 fn is_hidden_path(rel: &Path) -> bool {
@@ -56,6 +66,14 @@ fn parse_bool_setting(value: &str) -> Option<bool> {
     }
 }
 
+fn parse_sort_mode_setting(value: &str) -> Option<SortMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "depth" => Some(SortMode::Depth),
+        "alphabetical" => Some(SortMode::Alphabetical),
+        _ => None,
+    }
+}
+
 fn yoinkignore_path() -> Option<PathBuf> {
     if let Some(path) = env::var_os("YOINKIGNORE_PATH") {
         return Some(PathBuf::from(path));
@@ -68,6 +86,7 @@ fn load_settings() -> Result<YoinkSettings> {
     let mut include_hidden = false;
     let mut include_mounts = false;
     let mut include_symlinks = false;
+    let mut sort_mode = SortMode::Depth;
     let mut globs: Vec<String> = DEFAULT_IGNORE_GLOBS
         .iter()
         .map(|pattern| pattern.to_string())
@@ -106,6 +125,12 @@ fn load_settings() -> Result<YoinkSettings> {
                             })?;
                             continue;
                         }
+                        "sort_mode" => {
+                            sort_mode = parse_sort_mode_setting(value).with_context(|| {
+                                format!("invalid sort_mode value in {}: {value}", ignore_file.display())
+                            })?;
+                            continue;
+                        }
                         _ => {}
                     }
                 }
@@ -128,6 +153,7 @@ fn load_settings() -> Result<YoinkSettings> {
         include_hidden,
         include_mounts,
         include_symlinks,
+        sort_mode,
         globset,
         globs,
     })
@@ -294,16 +320,88 @@ pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
     }
 
     let mut list: Vec<Candidate> = map.into_values().collect();
-    list.sort_by_key(candidate_sort_key);
+    sort_candidates(&mut list, settings.sort_mode);
     Ok(list)
 }
 
-pub fn format_candidates(candidates: &[Candidate]) -> String {
-    let mut out = String::new();
+pub fn build_search_entries(query: &str, cwd: &Path) -> Result<Vec<SearchEntry>> {
+    let settings = load_settings()?;
+    let candidates = build_candidates(query, cwd)?;
+    let highlight_re = if query.trim().is_empty() {
+        None
+    } else {
+        Regex::new(query).ok()
+    };
+
+    let occurrence_map = if query.trim().is_empty() {
+        HashMap::new()
+    } else {
+        collect_occurrences(query, cwd, &settings)?
+    };
+
+    let mut entries = Vec::new();
+
     for candidate in candidates {
-        out.push_str(candidate.tag());
+        let occurrences = occurrence_map.get(&candidate.path).cloned().unwrap_or_default();
+        let count = occurrences.len();
+
+        if candidate.path_match || count > 0 {
+            let icon = if candidate.is_dir { "📁" } else { "📄" };
+            let path_display = highlight_query_matches(
+                &candidate.path.to_string_lossy(),
+                highlight_re.as_ref(),
+            );
+
+            let display = format!("{} {}", icon, path_display);
+
+            entries.push(SearchEntry {
+                display,
+                path: candidate.path.clone(),
+                line: None,
+            });
+
+            let line_width = occurrences
+                .iter()
+                .map(|occurrence| occurrence.line.to_string().len())
+                .max()
+                .unwrap_or(4)
+                .max(4);
+
+            for (index, occurrence) in occurrences.into_iter().enumerate() {
+                let snippet = highlight_query_matches(&occurrence.snippet, highlight_re.as_ref());
+                let count_prefix = if index == 0 {
+                    format!("\x1b[33m{:>2}\x1b[0m", count)
+                } else {
+                    "  ".to_string()
+                };
+
+                entries.push(SearchEntry {
+                    display: format!(
+                        "{}   ↳ {:>width$}  {}",
+                        count_prefix,
+                        occurrence.line,
+                        truncate_snippet(&snippet, 140),
+                        width = line_width
+                    ),
+                    path: candidate.path.clone(),
+                    line: Some(occurrence.line),
+                });
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+pub fn format_search_entries(entries: &[SearchEntry]) -> String {
+    let mut out = String::new();
+    for entry in entries {
+        let line = entry.line.map(|v| v.to_string()).unwrap_or_default();
+        out.push_str(&entry.display.replace('\t', "    "));
         out.push('\t');
-        out.push_str(&candidate.path.to_string_lossy());
+        out.push_str(&entry.path.to_string_lossy());
+        out.push('\t');
+        out.push_str(&line);
         out.push('\n');
     }
     out
@@ -313,9 +411,139 @@ fn path_depth(path: &Path) -> usize {
     path.components().count()
 }
 
-fn candidate_sort_key(candidate: &Candidate) -> (usize, String) {
-    (
-        path_depth(&candidate.path),
-        candidate.path.to_string_lossy().to_string(),
-    )
+fn truncate_snippet(snippet: &str, max_chars: usize) -> String {
+    if snippet.chars().count() <= max_chars {
+        return snippet.to_string();
+    }
+
+    let mut out = String::new();
+    for (idx, ch) in snippet.chars().enumerate() {
+        if idx >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+fn highlight_query_matches(text: &str, re: Option<&Regex>) -> String {
+    let Some(re) = re else {
+        return text.to_string();
+    };
+
+    let mut out = String::new();
+    let mut last = 0usize;
+
+    for matched in re.find_iter(text) {
+        if matched.start() > last {
+            out.push_str(&text[last..matched.start()]);
+        }
+        out.push_str("\x1b[1;36m");
+        out.push_str(matched.as_str());
+        out.push_str("\x1b[0m");
+        last = matched.end();
+    }
+
+    if last < text.len() {
+        out.push_str(&text[last..]);
+    }
+
+    out
+}
+
+fn sort_candidates(candidates: &mut [Candidate], sort_mode: SortMode) {
+    match sort_mode {
+        SortMode::Depth => {
+            candidates.sort_by_key(|candidate| {
+                (
+                    path_depth(&candidate.path),
+                    candidate.path.to_string_lossy().to_string(),
+                )
+            });
+        }
+        SortMode::Alphabetical => {
+            candidates.sort_by_key(|candidate| candidate.path.to_string_lossy().to_string());
+        }
+    }
+}
+
+fn collect_occurrences(
+    query: &str,
+    cwd: &Path,
+    settings: &YoinkSettings,
+) -> Result<HashMap<PathBuf, Vec<Occurrence>>> {
+    let mut rg_command = Command::new("rg");
+    rg_command
+        .arg("-n")
+        .arg("--column")
+        .arg("--no-heading")
+        .arg("--color=never")
+        .arg("--no-messages")
+        .arg("-e")
+        .arg(query);
+
+    if settings.include_hidden {
+        rg_command.arg("--hidden");
+    }
+
+    if !settings.include_mounts {
+        rg_command.arg("--one-file-system");
+    }
+
+    if settings.include_symlinks {
+        rg_command.arg("--follow");
+    }
+
+    for pattern in &settings.globs {
+        rg_command.arg("-g").arg(format!("!{pattern}"));
+    }
+
+    let output = rg_command
+        .arg(".")
+        .current_dir(cwd)
+        .output()
+        .context("failed to execute rg for detailed occurrences")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut map: HashMap<PathBuf, Vec<Occurrence>> = HashMap::new();
+
+    for raw_line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let mut parts = raw_line.splitn(4, ':');
+        let raw_path = match parts.next() {
+            Some(value) => value,
+            None => continue,
+        };
+        let raw_line_num = match parts.next() {
+            Some(value) => value,
+            None => continue,
+        };
+        let raw_column = match parts.next() {
+            Some(value) => value,
+            None => continue,
+        };
+        let raw_snippet = parts.next().unwrap_or_default();
+
+        let path = PathBuf::from(raw_path.trim_start_matches("./"));
+        let line_num = match raw_line_num.parse::<usize>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let column = match raw_column.parse::<usize>() {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+
+        map.entry(path).or_default().push(Occurrence {
+            line: line_num,
+            column,
+            snippet: raw_snippet.replace('\t', " ").trim().to_string(),
+        });
+    }
+
+    for occurrences in map.values_mut() {
+        occurrences.sort_by_key(|occurrence| (occurrence.line, occurrence.column));
+    }
+
+    Ok(map)
 }

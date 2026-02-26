@@ -178,3 +178,33 @@ fn sorts_by_depth_then_alphabetical() {
         assert!(z_root_idx < deep_idx);
     });
 }
+
+#[test]
+fn sorts_alphabetically_when_configured() {
+    with_system_config("sort_mode=alphabetical\n.git/**\nnode_modukes/**\n", |_| {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("a/deeper")).expect("mkdir a/deeper");
+        fs::write(root.join("z_root.txt"), "root\n").expect("write z_root");
+        fs::write(root.join("a/deeper/file1.txt"), "x\n").expect("write file1");
+        fs::write(root.join("a_root.txt"), "root\n").expect("write a_root");
+
+        let candidates = build_candidates("", root).expect("build candidates");
+        let paths: Vec<String> = candidates
+            .into_iter()
+            .map(|candidate| candidate.path.to_string_lossy().to_string())
+            .collect();
+
+        let a_deep_idx = paths
+            .iter()
+            .position(|path| path == "a/deeper/file1.txt")
+            .expect("a/deep index");
+        let a_root_idx = paths
+            .iter()
+            .position(|path| path == "a_root.txt")
+            .expect("a_root index");
+
+        assert!(a_deep_idx < a_root_idx);
+    });
+}
