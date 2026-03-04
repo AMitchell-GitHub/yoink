@@ -11,7 +11,7 @@ Results are shown on the left, with a live preview on the right.
 ## Install (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AMitchell-GitHub/yoink/main/scripts/install-from-release.sh | bash -s -- AMitchell-GitHub/yoink
+curl -fsSL https://raw.githubusercontent.com/AMitchell-GitHub/yoink/refs/heads/master/scripts/install-from-release.sh | bash -s -- AMitchell-GitHub/yoink
 ```
 
 This installs:
