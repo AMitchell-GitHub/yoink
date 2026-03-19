@@ -1,4 +1,4 @@
-# yoink
+# yoink ![GitHub all releases](https://img.shields.io/github/downloads/AMItchell-GitHub/yoink/total)
 
 `yoink` is an interactive terminal search tool powered by `ripgrep`, `fzf`, and `bat`.
 
