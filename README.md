@@ -1,3 +1,5 @@
+<img width="2717" height="1389" alt="image" src="https://github.com/user-attachments/assets/bc951854-50cb-48b6-be5b-17b86f315f1c" />
+
 # yoink ![GitHub all releases](https://img.shields.io/github/downloads/AMItchell-GitHub/yoink/total)
 
 `yoink` is an interactive terminal search tool powered by `ripgrep`, `fzf`, and `bat`.
