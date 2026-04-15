@@ -44,6 +44,14 @@ yoink
 yoink ejectReasons
 ```
 
+Here are a few other regex examples to help you along:
+```
+[Ss]earch                     --> any char in []; matches: "search", "Search"
+(?i)search                    --> case-ignore; matches: "SeArCh", "search", "SEARCH"
+term1.*term2                  --> multi-term; matches: "asdfb_term1+gfdskrjhfgrd.term2=fasdfe"
+(term1|term2).*(term1|term2)  --> disordered multi-term
+```
+
 ## Keybinds
 
 - `Enter`: print the containing directory of selected result
