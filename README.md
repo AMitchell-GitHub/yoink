@@ -92,7 +92,7 @@ include_symlinks=false
 sort_mode=depth
 
 .git/**
-node_modukes/**
+node_modules/**
 ```
 
 Behavior:

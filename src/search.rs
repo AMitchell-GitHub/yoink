@@ -16,7 +16,14 @@ use walkdir::WalkDir;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::MetadataExt;
 
-const DEFAULT_IGNORE_GLOBS: &[&str] = &[".git/**", "node_modukes/**"];
+// Patterns are matched against the relative path of each walk entry. To prune
+// directories at *any* depth (not just at the cwd root), the pattern must match
+// the directory's path itself — `**/name` — so `WalkDir::filter_entry` can
+// return `false` and skip descending. The previous `name/**` form only matched
+// children, which means we used to walk into every nested `node_modules` and
+// `.git` before filtering individual files. In a tree with many sub-repos this
+// added seconds per search.
+const DEFAULT_IGNORE_GLOBS: &[&str] = &["**/.git", "**/node_modules"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortMode {
@@ -32,7 +39,7 @@ pub struct Candidate {
     pub content_match: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct YoinkSettings {
     include_hidden: bool,
     include_mounts: bool,
@@ -164,9 +171,16 @@ fn load_settings() -> Result<YoinkSettings> {
     })
 }
 
-pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
+/// Walk the directory tree and return path-name matches as `Candidate`s.
+/// Does NOT run rg — only directory traversal with regex filtering on
+/// path components. This is the fast half of `build_search_entries`, and is
+/// also used as the first step of `build_candidates`.
+fn walk_path_candidates(
+    query: &str,
+    cwd: &Path,
+    settings: &YoinkSettings,
+) -> Result<HashMap<PathBuf, Candidate>> {
     let mut map: HashMap<PathBuf, Candidate> = HashMap::new();
-    let settings = load_settings()?;
 
     #[cfg(target_family = "unix")]
     let root_dev = if settings.include_mounts {
@@ -257,6 +271,29 @@ pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
         }
     }
 
+    Ok(map)
+}
+
+// Kept as a public API for the integration tests in tests/search.rs, which
+// assert combined path + content matching against small temp fixtures. The
+// optimized hot path used by the running binary lives in
+// `build_search_entries` and bypasses this function.
+#[allow(dead_code)]
+pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
+    let settings = load_settings()?;
+    let mut map = walk_path_candidates(query, cwd, &settings)?;
+
+    #[cfg(target_family = "unix")]
+    let root_dev = if settings.include_mounts {
+        None
+    } else {
+        Some(
+            fs::metadata(cwd)
+                .with_context(|| format!("failed to stat search root: {}", cwd.display()))?
+                .dev(),
+        )
+    };
+
     if !query.is_empty() {
         let mut rg_command = Command::new("rg");
         rg_command
@@ -331,18 +368,61 @@ pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
 
 pub fn build_search_entries(query: &str, cwd: &Path) -> Result<Vec<SearchEntry>> {
     let settings = load_settings()?;
-    let candidates = build_candidates(query, cwd)?;
     let highlight_re = if query.trim().is_empty() {
         None
     } else {
         Regex::new(query).ok()
     };
 
-    let occurrence_map = if query.trim().is_empty() {
-        HashMap::new()
+    // Run the filesystem walk (which finds path-name matches) and rg
+    // (which finds content matches with positions) in parallel — they're
+    // both I/O-heavy and independent, so doing them on separate threads
+    // roughly halves the search latency on big trees. We also no longer
+    // run a separate `rg -l` call inside the walk path: the data from
+    // `collect_occurrences` (rg -n --column) already tells us which files
+    // had content matches, so the older code was effectively running rg
+    // twice over the same tree.
+    let occ_handle = if query.trim().is_empty() {
+        None
     } else {
-        collect_occurrences(query, cwd, &settings)?
+        let query_owned = query.to_string();
+        let cwd_owned = cwd.to_path_buf();
+        let settings_owned = settings.clone();
+        Some(std::thread::spawn(move || {
+            collect_occurrences(&query_owned, &cwd_owned, &settings_owned)
+        }))
     };
+
+    let mut candidate_map = walk_path_candidates(query, cwd, &settings)?;
+
+    let occurrence_map = if let Some(handle) = occ_handle {
+        match handle.join() {
+            Ok(Ok(map)) => map,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => HashMap::new(),
+        }
+    } else {
+        HashMap::new()
+    };
+
+    // Merge: any file with occurrences but no path-name match becomes a
+    // content-only candidate.
+    for path in occurrence_map.keys() {
+        let full = cwd.join(path);
+        let is_dir = full.is_dir();
+        candidate_map
+            .entry(path.clone())
+            .and_modify(|c| c.content_match = true)
+            .or_insert(Candidate {
+                path: path.clone(),
+                is_dir,
+                path_match: false,
+                content_match: true,
+            });
+    }
+
+    let mut candidates: Vec<Candidate> = candidate_map.into_values().collect();
+    sort_candidates(&mut candidates, settings.sort_mode);
 
     let mut entries = Vec::new();
 
@@ -404,6 +484,21 @@ pub fn build_search_entries(query: &str, cwd: &Path) -> Result<Vec<SearchEntry>>
 pub fn run_search_streaming(query: &str, cwd: &Path) -> Result<()> {
     use std::io::Write;
 
+    // Empty query is the startup state — fzf's `start:reload` bind invokes
+    // __search with no query before the user has typed anything. The previous
+    // behavior walked the entire tree and emitted every file as a row (460k+
+    // rows / ~3s on a big multi-repo). fzf then had to ingest and render all
+    // of those rows before it could fire the first preview, which is why
+    // launching yoink "stalled" with a loading indicator for several seconds.
+    //
+    // yoink is a regex-search tool, not a file browser — the empty-query list
+    // is never actually useful. Returning early here means the prompt opens
+    // instantly and the first real reload (triggered by the user's first
+    // keystroke) is the one that does work.
+    if query.trim().is_empty() {
+        return Ok(());
+    }
+
     if !blame_sort_active() {
         let entries = build_search_entries(query, cwd)?;
         let stdout = std::io::stdout();
@@ -413,22 +508,10 @@ pub fn run_search_streaming(query: &str, cwd: &Path) -> Result<()> {
     }
 
     let settings = load_settings()?;
-    let highlight_re = if query.trim().is_empty() {
-        None
-    } else {
-        Regex::new(query).ok()
-    };
+    let highlight_re = Regex::new(query).ok();
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-
-    // Empty query in blame mode: nothing meaningful to date-stamp. Fall
-    // through to the standard listing.
-    if query.trim().is_empty() {
-        let entries = build_search_entries(query, cwd)?;
-        out.write_all(format_search_entries(&entries).as_bytes())?;
-        return Ok(());
-    }
 
     // Strategy: collect every match grouped by file (cheap), then look up
     // cached blame data for each file, then sort globally by per-line blame

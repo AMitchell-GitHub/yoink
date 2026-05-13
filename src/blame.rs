@@ -8,6 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const BLAME_SORT_ENV: &str = "YOINK_BLAME_SORT_FILE";
+/// Per-fzf-session cache directory env var. Set unconditionally by
+/// `ui::run_fzf_session` so blame results can be cached regardless of whether
+/// the user has toggled blame-sort mode — that way previewing many files in
+/// regular search mode only pays the git-blame cost once per file.
+pub const SESSION_CACHE_ENV: &str = "YOINK_CACHE_DIR";
 
 pub fn state_file_path() -> Option<PathBuf> {
     env::var_os(BLAME_SORT_ENV).map(PathBuf::from)
@@ -19,26 +24,21 @@ pub fn blame_sort_active() -> bool {
         .unwrap_or(false)
 }
 
-/// Per-session cache directory for blame results. Living next to the state
-/// file means it shares the session's PID and is cleaned up when the session
-/// ends. Returns None when blame mode is not active (no state file env var).
-pub fn blame_cache_dir() -> Option<PathBuf> {
-    let state = state_file_path()?;
-    let parent = state
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let stem = state
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "yoink-blame".to_string());
-    Some(parent.join(format!("{stem}-cache")))
+pub fn session_cache_dir() -> Option<PathBuf> {
+    env::var_os(SESSION_CACHE_ENV).map(PathBuf::from)
 }
 
-pub fn clear_blame_cache() {
-    if let Some(dir) = blame_cache_dir() {
+pub fn clear_session_cache() {
+    if let Some(dir) = session_cache_dir() {
         let _ = fs::remove_dir_all(&dir);
     }
+}
+
+/// Back-compat name used by `__blame_collect` when toggling blame-sort ON, to
+/// force fresh blame data (mtime-based invalidation might miss mid-session
+/// commits where the working file is unchanged).
+pub fn clear_blame_cache() {
+    clear_session_cache();
 }
 
 fn cache_path_for(cache_dir: &Path, abs: &Path) -> PathBuf {
@@ -47,13 +47,194 @@ fn cache_path_for(cache_dir: &Path, abs: &Path) -> PathBuf {
     cache_dir.join(format!("{:016x}.blame", hasher.finish()))
 }
 
-/// Cached wrapper around `blame_times_for_file`. The cache is invalidated when
-/// the source file's mtime is newer than the cache entry's mtime, so editing a
-/// file mid-session will trigger a re-blame on the next read.
-pub fn blame_times_cached(cwd: &Path, file: &Path) -> HashMap<usize, i64> {
+/// Rich per-line blame data — what `--line-porcelain` gives us. Used by both
+/// the blame-sort path (which only needs timestamps) and the preview header
+/// (which also wants the sha and author name).
+#[derive(Debug, Clone)]
+pub struct LineBlame {
+    pub timestamp: i64,
+    pub sha: String,
+    pub author: String,
+}
+
+/// Per-line blame for the focused line only. Uses `git blame -L N,N` which
+/// stops walking history once it finds the commit that introduced that one
+/// line — typically 50–500ms even on huge files in deep repos, versus 1.5s+
+/// for a whole-file porcelain blame. Results are merged into the same
+/// per-file cache so callers like preview-on-arrow-key get instant repeat
+/// lookups, and blame-sort can opportunistically use whatever lines are
+/// already cached.
+pub fn blame_for_line_cached(cwd: &Path, file: &Path, line: usize) -> Option<LineBlame> {
     let abs = cwd.join(file);
 
-    if let Some(cache_dir) = blame_cache_dir() {
+    // Cache hit: existing whole-file or per-line entry.
+    if let Some(cache_dir) = session_cache_dir() {
+        let cache_file = cache_path_for(&cache_dir, &abs);
+        if let Some(map) = read_cache_if_fresh(&cache_file, &abs) {
+            if let Some(info) = map.get(&line) {
+                return Some(info.clone());
+            }
+        }
+    }
+
+    // Cache miss: run a single-line blame.
+    let info = blame_one_line(cwd, file, line)?;
+
+    // Merge into the on-disk cache so subsequent previews hit it. Read the
+    // current map first so we don't clobber other lines that previous calls
+    // populated.
+    if let Some(cache_dir) = session_cache_dir() {
+        let cache_file = cache_path_for(&cache_dir, &abs);
+        let mut map = read_cache_if_fresh(&cache_file, &abs).unwrap_or_default();
+        map.insert(line, info.clone());
+        let _ = fs::create_dir_all(&cache_dir);
+        let mut body = String::new();
+        for (l, b) in &map {
+            body.push_str(&format!("{}\t{}\t{}\t{}\n", l, b.timestamp, b.sha, b.author));
+        }
+        let _ = fs::write(&cache_file, body);
+    }
+
+    Some(info)
+}
+
+fn read_cache_if_fresh(cache_file: &Path, abs: &Path) -> Option<HashMap<usize, LineBlame>> {
+    let file_mtime = fs::metadata(abs).and_then(|m| m.modified()).ok()?;
+    let cache_mtime = fs::metadata(cache_file).and_then(|m| m.modified()).ok()?;
+    if cache_mtime < file_mtime {
+        return None;
+    }
+    let content = fs::read_to_string(cache_file).ok()?;
+    Some(parse_cache_blob(&content))
+}
+
+/// Fast file-level summary: most recent commit's author-time + author name.
+/// Used by the preview header when the focused row is a file entry rather
+/// than a match line. `git log -1` is ~30ms even on big repos.
+pub fn file_last_touched(cwd: &Path, file: &Path) -> Option<(i64, String)> {
+    let abs = cwd.join(file);
+    let repo_root = abs.parent().and_then(find_repo_root)?;
+    let rel_to_repo = abs.strip_prefix(&repo_root).ok()?;
+    let output = Command::new("git")
+        .arg("log")
+        .arg("-1")
+        .arg("--format=%at%x09%an")
+        .arg("--")
+        .arg(rel_to_repo)
+        .current_dir(&repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next()?;
+    let mut parts = line.splitn(2, '\t');
+    let ts: i64 = parts.next()?.parse().ok()?;
+    let author = parts.next().unwrap_or("").to_string();
+    Some((ts, author))
+}
+
+fn blame_one_line(cwd: &Path, file: &Path, line: usize) -> Option<LineBlame> {
+    let abs = cwd.join(file);
+    let repo_root = abs.parent().and_then(find_repo_root)?;
+    let rel_to_repo = abs.strip_prefix(&repo_root).ok()?;
+
+    let range = format!("{line},{line}");
+    let output = Command::new("git")
+        .arg("blame")
+        .arg("-L")
+        .arg(&range)
+        .arg("--line-porcelain")
+        .arg("--")
+        .arg(rel_to_repo)
+        .current_dir(&repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut sha = String::new();
+    let mut author = String::new();
+    let mut timestamp: Option<i64> = None;
+
+    for raw in stdout.lines() {
+        if raw.starts_with('\t') {
+            break;
+        }
+        if let Some(rest) = raw.strip_prefix("author ") {
+            author = rest.replace('\t', " ");
+            continue;
+        }
+        if let Some(rest) = raw.strip_prefix("author-time ") {
+            timestamp = rest.split_whitespace().next().and_then(|v| v.parse().ok());
+            continue;
+        }
+        if sha.is_empty()
+            && raw.len() >= 40
+            && raw[..40].chars().all(|c| c.is_ascii_hexdigit())
+        {
+            sha = raw[..40].to_string();
+        }
+    }
+
+    let timestamp = timestamp?;
+    if sha.is_empty() {
+        return None;
+    }
+    Some(LineBlame {
+        sha,
+        timestamp,
+        author,
+    })
+}
+
+/// Non-blocking cache probe: returns `Some(map)` only if a fresh cache entry
+/// already exists on disk for this file. Never spawns git. Used by callers
+/// that want to decide *whether* to wait for blame data (e.g. the preview
+/// pane chooses blame-at-top on a warm cache, blame-at-bottom-after-content
+/// on a cold cache so the file body appears immediately).
+pub fn try_blame_from_cache(cwd: &Path, file: &Path) -> Option<HashMap<usize, LineBlame>> {
+    let cache_dir = session_cache_dir()?;
+    let abs = cwd.join(file);
+    let cache_file = cache_path_for(&cache_dir, &abs);
+    let file_mtime = fs::metadata(&abs).and_then(|m| m.modified()).ok()?;
+    let cache_mtime = fs::metadata(&cache_file).and_then(|m| m.modified()).ok()?;
+    if cache_mtime < file_mtime {
+        return None;
+    }
+    let content = fs::read_to_string(&cache_file).ok()?;
+    Some(parse_cache_blob(&content))
+}
+
+/// Convenience accessors that operate on an already-fetched blame map. Used
+/// by the preview pane to format the same blame info regardless of whether
+/// the data came from a cache hit (header position) or a deferred fetch
+/// (footer position after bat).
+pub fn line_summary_from_map(map: &HashMap<usize, LineBlame>, line: usize) -> Option<String> {
+    let info = map.get(&line)?;
+    let sha_short: String = info.sha.chars().take(8).collect();
+    Some(format!(
+        "{sha_short} {} {}",
+        format_unix_date(info.timestamp),
+        info.author
+    ))
+}
+
+pub fn latest_change_from_map(map: &HashMap<usize, LineBlame>) -> Option<(i64, String)> {
+    map.values()
+        .max_by_key(|b| b.timestamp)
+        .map(|b| (b.timestamp, b.author.clone()))
+}
+
+/// Cached version of `blame_for_file`. Cache entries are invalidated when the
+/// source file's mtime is newer than the cache entry's mtime.
+pub fn blame_for_file_cached(cwd: &Path, file: &Path) -> HashMap<usize, LineBlame> {
+    let abs = cwd.join(file);
+
+    if let Some(cache_dir) = session_cache_dir() {
         let cache_file = cache_path_for(&cache_dir, &abs);
         let file_mtime = fs::metadata(&abs).and_then(|m| m.modified()).ok();
         let cache_mtime = fs::metadata(&cache_file).and_then(|m| m.modified()).ok();
@@ -65,30 +246,50 @@ pub fn blame_times_cached(cwd: &Path, file: &Path) -> HashMap<usize, i64> {
             }
         }
 
-        let times = blame_times_for_file(cwd, file);
+        let blame = blame_for_file(cwd, file);
         let _ = fs::create_dir_all(&cache_dir);
         let mut body = String::new();
-        for (line, ts) in &times {
-            body.push_str(&format!("{line} {ts}\n"));
+        for (line, info) in &blame {
+            body.push_str(&format!(
+                "{}\t{}\t{}\t{}\n",
+                line, info.timestamp, info.sha, info.author
+            ));
         }
         let _ = fs::write(&cache_file, body);
-        return times;
+        return blame;
     }
 
-    blame_times_for_file(cwd, file)
+    blame_for_file(cwd, file)
 }
 
-fn parse_cache_blob(content: &str) -> HashMap<usize, i64> {
+/// Convenience wrapper for callers that only need timestamps (search.rs sort).
+pub fn blame_times_cached(cwd: &Path, file: &Path) -> HashMap<usize, i64> {
+    blame_for_file_cached(cwd, file)
+        .into_iter()
+        .map(|(line, info)| (line, info.timestamp))
+        .collect()
+}
+
+fn parse_cache_blob(content: &str) -> HashMap<usize, LineBlame> {
     let mut map = HashMap::new();
     for raw in content.lines() {
-        let mut parts = raw.split_whitespace();
+        let mut parts = raw.splitn(4, '\t');
         let Some(line) = parts.next().and_then(|v| v.parse::<usize>().ok()) else {
             continue;
         };
         let Some(ts) = parts.next().and_then(|v| v.parse::<i64>().ok()) else {
             continue;
         };
-        map.insert(line, ts);
+        let sha = parts.next().unwrap_or("").to_string();
+        let author = parts.next().unwrap_or("").to_string();
+        map.insert(
+            line,
+            LineBlame {
+                timestamp: ts,
+                sha,
+                author,
+            },
+        );
     }
     map
 }
@@ -125,12 +326,12 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Returns a map of (1-indexed line number) -> author-time (unix seconds)
-/// for the given file. The git command is run from the file's containing
-/// repository, so this works even when `cwd` is a parent directory holding
-/// multiple independent sub-repos. Returns empty map on any failure.
-pub fn blame_times_for_file(cwd: &Path, file: &Path) -> HashMap<usize, i64> {
-    let mut out = HashMap::new();
+/// Returns a map of (1-indexed line number) -> rich blame info for the given
+/// file. The git command is run from the file's containing repository, so
+/// this works even when `cwd` is a parent directory holding multiple
+/// independent sub-repos. Returns empty map on any failure.
+pub fn blame_for_file(cwd: &Path, file: &Path) -> HashMap<usize, LineBlame> {
+    let mut out: HashMap<usize, LineBlame> = HashMap::new();
     let abs = cwd.join(file);
     let Some(repo_root) = abs.parent().and_then(find_repo_root) else {
         return out;
@@ -154,18 +355,36 @@ pub fn blame_times_for_file(cwd: &Path, file: &Path) -> HashMap<usize, i64> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut current_line: Option<usize> = None;
     let mut current_time: Option<i64> = None;
+    let mut current_sha = String::new();
+    let mut current_author = String::new();
 
     for raw in stdout.lines() {
         if let Some(first) = raw.chars().next() {
             // Header lines start with sha (40 hex). Content lines start with a tab.
             if first == '\t' {
                 if let (Some(line), Some(ts)) = (current_line, current_time) {
-                    out.insert(line, ts);
+                    out.insert(
+                        line,
+                        LineBlame {
+                            timestamp: ts,
+                            sha: current_sha.clone(),
+                            author: current_author.clone(),
+                        },
+                    );
                 }
                 current_line = None;
                 current_time = None;
                 continue;
             }
+        }
+
+        // `author <name>` may contain spaces — split into 2 instead of 4 so
+        // the whole rest-of-line becomes the author name. Other keys use a
+        // larger split.
+        if let Some(author) = raw.strip_prefix("author ") {
+            // Strip any tabs (cache format uses tabs as field separators).
+            current_author = author.replace('\t', " ");
+            continue;
         }
 
         let mut parts = raw.splitn(4, ' ');
@@ -179,6 +398,7 @@ pub fn blame_times_for_file(cwd: &Path, file: &Path) -> HashMap<usize, i64> {
             _ => {
                 // header line: <sha> <orig-line> <final-line> [num-lines]
                 if key.len() == 40 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+                    current_sha = key.to_string();
                     // skip orig-line
                     parts.next();
                     if let Some(final_line) = parts.next() {
@@ -190,109 +410,6 @@ pub fn blame_times_for_file(cwd: &Path, file: &Path) -> HashMap<usize, i64> {
     }
 
     out
-}
-
-/// Get the most-recent commit author-time for one file. Returns the raw git
-/// stderr on failure so callers can show *why* blame information is
-/// unavailable instead of silently hiding the cause. Runs git inside the
-/// file's actual containing repo (handles nested independent repos).
-pub fn file_last_touched_verbose(cwd: &Path, file: &Path) -> Result<i64, String> {
-    let abs = cwd.join(file);
-    let repo_root = abs
-        .parent()
-        .and_then(find_repo_root)
-        .ok_or_else(|| format!("no .git ancestor found for {}", abs.display()))?;
-    let rel_to_repo = abs
-        .strip_prefix(&repo_root)
-        .map_err(|_| "file is not under its detected repo root".to_string())?;
-
-    let output = Command::new("git")
-        .arg("log")
-        .arg("-1")
-        .arg("--format=%at")
-        .arg("--")
-        .arg(rel_to_repo)
-        .current_dir(&repo_root)
-        .output()
-        .map_err(|e| format!("failed to spawn git: {e}"))?;
-
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if msg.is_empty() {
-            format!("git log exited with status {}", output.status)
-        } else {
-            msg
-        });
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return Err(format!(
-            "no commits touch this file in {} (untracked or never committed)",
-            repo_root.display()
-        ));
-    }
-    trimmed
-        .parse::<i64>()
-        .map_err(|e| format!("could not parse git timestamp '{trimmed}': {e}"))
-}
-
-/// Quick check: is `cwd` inside a git working tree? Returns the toplevel path
-/// on success, or git's stderr on failure.
-pub fn git_toplevel(cwd: &Path) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("rev-parse")
-        .arg("--show-toplevel")
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| format!("failed to spawn git: {e}"))?;
-    if !output.status.success() {
-        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if msg.is_empty() {
-            format!("git rev-parse exited with status {}", output.status)
-        } else {
-            msg
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Returns a short blame summary for a specific line: "abc1234 2024-05-11 Author Name"
-pub fn blame_line_summary(cwd: &Path, file: &Path, line: usize) -> Option<String> {
-    let abs = cwd.join(file);
-    let repo_root = abs.parent().and_then(find_repo_root)?;
-    let rel_to_repo = abs.strip_prefix(&repo_root).ok()?;
-    let range = format!("{line},{line}");
-    let output = Command::new("git")
-        .arg("blame")
-        .arg("-L")
-        .arg(&range)
-        .arg("--date=short")
-        .arg("-w")
-        .arg("--")
-        .arg(rel_to_repo)
-        .current_dir(&repo_root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first = stdout.lines().next()?;
-    // Format: <sha> (<author> <date> <time> <tz> <line>) <content>
-    let sha_end = first.find(' ')?;
-    let sha = &first[..sha_end.min(8)];
-    let paren_start = first.find('(')?;
-    let paren_end = first.find(')')?;
-    let inside = &first[paren_start + 1..paren_end];
-    // With --date=short the inside tokens are: <author...> <YYYY-MM-DD> <lineno>
-    let tokens: Vec<&str> = inside.split_whitespace().collect();
-    if tokens.len() < 3 {
-        return Some(format!("{sha} {inside}"));
-    }
-    let author = tokens[..tokens.len() - 2].join(" ");
-    let date = tokens[tokens.len() - 2];
-    Some(format!("{sha} {date} {author}"))
 }
 
 pub fn format_unix_date(ts: i64) -> String {

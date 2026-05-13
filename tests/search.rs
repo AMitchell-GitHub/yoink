@@ -5,6 +5,37 @@ use std::sync::{Mutex, OnceLock};
 use tempfile::tempdir;
 use yoink::search::build_candidates;
 
+#[test]
+fn build_candidates_errors_on_invalid_regex() {
+    with_system_config(".git/**\nnode_modules/**\n", |_| {
+        let dir = tempdir().expect("tempdir");
+        // `*` with nothing in front is an invalid PCRE-style atom.
+        let err = build_candidates("*", dir.path()).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("invalid regex query"),
+            "expected an 'invalid regex query' anyhow context, got: {msg}"
+        );
+    });
+}
+
+#[test]
+fn build_candidates_returns_files_for_empty_query() {
+    with_system_config(".git/**\nnode_modules/**\n", |_| {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("a.txt"), "alpha\n").expect("write a");
+        fs::write(dir.path().join("b.txt"), "beta\n").expect("write b");
+
+        let candidates = build_candidates("", dir.path()).expect("build candidates");
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|c| c.path.to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"a.txt".to_string()), "got: {names:?}");
+        assert!(names.contains(&"b.txt".to_string()), "got: {names:?}");
+    });
+}
+
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -23,7 +54,7 @@ fn with_system_config(config_content: &str, test_fn: impl FnOnce(&Path)) {
 
 #[test]
 fn merges_path_and_content_matches() {
-    with_system_config(".git/**\nnode_modukes/**\n", |_| {
+    with_system_config(".git/**\nnode_modules/**\n", |_| {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
 
@@ -59,7 +90,7 @@ fn merges_path_and_content_matches() {
 
 #[test]
 fn skips_hidden_paths_by_default() {
-    with_system_config(".git/**\nnode_modukes/**\n", |_| {
+    with_system_config(".git/**\nnode_modules/**\n", |_| {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
 
@@ -80,7 +111,7 @@ fn skips_hidden_paths_by_default() {
 
 #[test]
 fn respects_yoinkignore_patterns() {
-    with_system_config(".git/**\nnode_modukes/**\nignored_dir/**\n", |_| {
+    with_system_config(".git/**\nnode_modules/**\nignored_dir/**\n", |_| {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
 
@@ -107,8 +138,8 @@ fn applies_builtin_default_ignores() {
 
         fs::create_dir(root.join(".git")).expect("mkdir git");
         fs::write(root.join(".git/ignored.txt"), "ejectReasons\n").expect("write git ignored");
-        fs::create_dir(root.join("node_modukes")).expect("mkdir node_modukes");
-        fs::write(root.join("node_modukes/ignored.txt"), "ejectReasons\n").expect("write node_modukes ignored");
+        fs::create_dir(root.join("node_modules")).expect("mkdir node_modules");
+        fs::write(root.join("node_modules/ignored.txt"), "ejectReasons\n").expect("write node_modules ignored");
         fs::write(root.join("kept.txt"), "ejectReasons\n").expect("write kept");
 
         let candidates = build_candidates("ejectReasons", root).expect("build candidates");
@@ -119,13 +150,13 @@ fn applies_builtin_default_ignores() {
 
         assert!(paths.iter().any(|path| path == "kept.txt"));
         assert!(!paths.iter().any(|path| path.starts_with(".git/")));
-        assert!(!paths.iter().any(|path| path.starts_with("node_modukes/")));
+        assert!(!paths.iter().any(|path| path.starts_with("node_modules/")));
     });
 }
 
 #[test]
 fn allows_hidden_when_toggle_enabled() {
-    with_system_config("include_hidden=true\n.git/**\nnode_modukes/**\n", |_| {
+    with_system_config("include_hidden=true\n.git/**\nnode_modules/**\n", |_| {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
 
@@ -144,7 +175,7 @@ fn allows_hidden_when_toggle_enabled() {
 
 #[test]
 fn sorts_by_depth_then_alphabetical() {
-    with_system_config(".git/**\nnode_modukes/**\n", |_| {
+    with_system_config(".git/**\nnode_modules/**\n", |_| {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
 
@@ -181,7 +212,7 @@ fn sorts_by_depth_then_alphabetical() {
 
 #[test]
 fn sorts_alphabetically_when_configured() {
-    with_system_config("sort_mode=alphabetical\n.git/**\nnode_modukes/**\n", |_| {
+    with_system_config("sort_mode=alphabetical\n.git/**\nnode_modules/**\n", |_| {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
 

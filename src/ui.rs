@@ -1,5 +1,5 @@
 use crate::actions::{open_in_editor, resolve_target_dir};
-use crate::blame::BLAME_SORT_ENV;
+use crate::blame::{BLAME_SORT_ENV, SESSION_CACHE_ENV};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,9 +17,19 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
     let state_file = std::env::temp_dir().join(format!("yoink-blame-{}", std::process::id()));
     let _ = std::fs::remove_file(&state_file);
 
+    // Per-session cache directory used by both the blame-sort path and the
+    // preview pane. Set unconditionally so previews can cache `git blame`
+    // output even when blame-sort mode is off — the file content shown in
+    // the preview triggers a cache fill once per file, then subsequent
+    // selections (especially line-to-line navigation within the same file)
+    // skip the git invocation entirely.
+    let cache_dir = std::env::temp_dir().join(format!("yoink-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache_dir);
+
     let mut command = Command::new("fzf");
     command
         .env(BLAME_SORT_ENV, &state_file)
+        .env(SESSION_CACHE_ENV, &cache_dir)
         .arg("--ansi")
         .arg("--delimiter")
         .arg("\t")
@@ -63,7 +73,7 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
         .context("failed to execute fzf for interactive selection")?;
 
     let _ = std::fs::remove_file(&state_file);
-    crate::blame::clear_blame_cache();
+    let _ = std::fs::remove_dir_all(&cache_dir);
 
     if !output.status.success() {
         return Ok(());
@@ -195,13 +205,22 @@ pub fn run_preview(
         bat.arg("--line-range=:300");
     }
 
+    // Blame is ALWAYS at the top now. Three strategies in priority order:
+    //   1. If a whole-file blame is already cached (e.g. blame-sort warmed
+    //      it), use it — sub-ms hashmap hit.
+    //   2. Otherwise, run a per-line blame for the focused line via
+    //      `git blame -L N,N`. Git stops walking history as soon as it
+    //      identifies that one line's commit, so this is 50–500ms even on
+    //      huge files instead of the 1.5s a whole-file blame would cost.
+    //   3. If we can't determine a focused line (file-level preview), fall
+    //      back to noting that the file is tracked but we don't have a
+    //      line-specific summary.
     print_blame_header(cwd, Path::new(selected_rel_path), selected_line);
 
     let status = bat
         .arg(&full)
         .status()
         .context("failed to preview file with bat")?;
-
     if !status.success() {
         Command::new("sed")
             .arg("-n")
@@ -216,46 +235,70 @@ pub fn run_preview(
 
 fn print_blame_header(cwd: &Path, rel: &Path, line: Option<usize>) {
     use crate::blame::{
-        blame_line_summary, file_last_touched_verbose, format_unix_date, git_toplevel,
+        blame_for_line_cached, file_last_touched, find_repo_root, format_unix_date,
+        latest_change_from_map, line_summary_from_map, try_blame_from_cache,
     };
 
-    print!("\x1b[1;33m📜 git blame\x1b[0m  ");
+    let separator = "\x1b[2;37m────────────────────────────────────────\x1b[0m";
+    let abs = cwd.join(rel);
 
-    // First make sure we're actually inside a git repo. If not, surface the
-    // real reason so the user can see why blame is unavailable.
-    match git_toplevel(cwd) {
-        Err(err) => {
-            println!("\x1b[1;31mgit unavailable here\x1b[0m");
-            println!("\x1b[2;37mcwd:\x1b[0m {}", cwd.display());
-            println!("\x1b[2;37mgit:\x1b[0m {err}");
-            println!("\x1b[2;37m────────────────────────────────────────\x1b[0m");
+    // No git working tree → nothing to blame, single short note above bat.
+    if abs.parent().and_then(find_repo_root).is_none() {
+        println!("\x1b[2;37m📜 git blame: file is not inside a git working tree\x1b[0m");
+        println!("{separator}");
+        return;
+    }
+
+    // Strategy 1: opportunistic full-file cache hit (e.g. blame-sort warmed
+    // it on Ctrl-B). Sub-millisecond.
+    if let Some(map) = try_blame_from_cache(cwd, rel) {
+        if let Some(line) = line {
+            if let Some(summary) = line_summary_from_map(&map, line) {
+                println!(
+                    "\x1b[1;33m📜 git blame\x1b[0m  \x1b[1;36mL{line}\x1b[0m  \x1b[37m{summary}\x1b[0m"
+                );
+                println!("{separator}");
+                return;
+            }
+        }
+        if let Some((ts, author)) = latest_change_from_map(&map) {
+            println!(
+                "\x1b[1;33m📜 git blame\x1b[0m  \x1b[37mlast touched\x1b[0m \x1b[1;35m{}\x1b[0m \x1b[37m{author}\x1b[0m",
+                format_unix_date(ts)
+            );
+            println!("{separator}");
             return;
         }
-        Ok(top) => {
-            if let Some(line) = line {
-                if let Some(summary) = blame_line_summary(cwd, rel, line) {
-                    println!("\x1b[1;36mL{line}\x1b[0m  \x1b[37m{summary}\x1b[0m");
-                    println!("\x1b[2;37m────────────────────────────────────────\x1b[0m");
-                    return;
-                }
-            }
-            match file_last_touched_verbose(cwd, rel) {
-                Ok(ts) => {
-                    println!(
-                        "\x1b[37mlast touched\x1b[0m \x1b[1;35m{}\x1b[0m",
-                        format_unix_date(ts)
-                    );
-                }
-                Err(err) => {
-                    println!("\x1b[1;31mblame unavailable\x1b[0m");
-                    println!("\x1b[2;37mrepo:\x1b[0m {top}");
-                    println!("\x1b[2;37mfile:\x1b[0m {}", rel.display());
-                    println!("\x1b[2;37mgit:\x1b[0m  {err}");
-                }
-            }
+    }
+
+    // Strategy 2: per-line blame for the focused line. Fast (50–500ms) and
+    // cached for repeat lookups.
+    if let Some(line) = line {
+        if let Some(info) = blame_for_line_cached(cwd, rel, line) {
+            let sha: String = info.sha.chars().take(8).collect();
+            println!(
+                "\x1b[1;33m📜 git blame\x1b[0m  \x1b[1;36mL{line}\x1b[0m  \x1b[37m{sha} {} {}\x1b[0m",
+                format_unix_date(info.timestamp),
+                info.author
+            );
+            println!("{separator}");
+            return;
         }
     }
-    println!("\x1b[2;37m────────────────────────────────────────\x1b[0m");
+
+    // Strategy 3: no focused line — use a quick file-level `git log -1` to
+    // show when the file was last touched. ~30ms even on big repos.
+    if let Some((ts, author)) = file_last_touched(cwd, rel) {
+        println!(
+            "\x1b[1;33m📜 git blame\x1b[0m  \x1b[37mlast touched\x1b[0m \x1b[1;35m{}\x1b[0m \x1b[37m{author}\x1b[0m",
+            format_unix_date(ts)
+        );
+        println!("{separator}");
+        return;
+    }
+
+    println!("\x1b[2;37m📜 git blame: file is untracked or has no history\x1b[0m");
+    println!("{separator}");
 }
 
 pub fn current_exe() -> Result<PathBuf> {
