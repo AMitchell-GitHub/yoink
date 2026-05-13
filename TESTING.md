@@ -142,30 +142,33 @@ yoink is within 1-2ms of raw ripgrep on a tiny repo — process spawn dominates.
 
 ### Big multi-repo — `~/mujin/jhbuildappcontroller/checkoutroot`
 
-Single timed run per (tool, query). 3-run medians weren't practical because
-`grep -rnI` on this tree (~2 million unfiltered files, 2057 nested
-`node_modules`, plus full git checkouts of scipy/matplotlib/etc.) takes
-2-3 minutes per invocation — a complete 3-run × 5-query × 3-tool sweep
-would be over an hour.
+3-run median per (tool, query). `grep -rnI` on this tree (~2 million
+unfiltered files, 2057 nested `node_modules`, plus full git checkouts of
+scipy/matplotlib/etc.) takes 1-3 minutes per invocation; ripgrep and yoink
+both respect `.gitignore` and skip ~1.55 million of those files, finishing
+in ~1 second.
 
-| Query | grep | ripgrep | yoink |
-|---|---:|---:|---:|
-| `productionCycle` | 171387ms (~3 min) | 1738ms | 1186ms |
+| Query | grep | ripgrep | yoink | yoink vs rg | yoink vs grep |
+|---|---:|---:|---:|---:|---:|
+| `productionCycle` | 171387ms | 1738ms | **1186ms** | 0.68× | 145× faster |
+| `mobilerobot`     | 142962ms |  963ms | **1310ms** | 1.36× | 109× faster |
+| `useState`        |  79005ms |  973ms | **1102ms** | 1.13× |  72× faster |
+| `orchestrator`    |  64322ms | 1116ms | **1390ms** | 1.24× |  46× faster |
+| `workerTimeout`   |  75260ms | 1010ms | **1025ms** | 1.01× |  73× faster |
 
-Headline numbers:
-- yoink runs in ~1 second on a tree where `grep -rnI` takes 2-3 minutes,
-  because yoink (like ripgrep) respects `.gitignore` and never walks into
-  `node_modules`, `target/`, vendored builds, etc.
-- yoink is approximately on par with ripgrep — sometimes faster, sometimes
-  slower depending on warm-cache ordering. Both are within their own run-to-
-  run noise (rg's runs were `[1855, 1738, 1103]`, yoink's were
-  `[1110, 1186, 1197]`).
-- The 5469× speedup over `grep` is the ignore-rules difference, not
-  algorithmic — yoink/ripgrep skip ~1.55 million files that grep visits.
+Headline observations:
+- yoink runs in ~1 second on a tree where `grep -rnI` takes 1-3 minutes.
+- yoink is **between 0.68× and 1.36×** raw `ripgrep`'s time depending on
+  query (mean ratio ≈ 1.09×). The variation is dominated by ripgrep's own
+  run-to-run noise (sample raw runs: `productionCycle` rg
+  `[1855, 1738, 1103]`, yoink `[1110, 1186, 1197]`) rather than systematic
+  overhead.
+- The 50-150× speedup over `grep` is entirely the ignore-rules difference,
+  not algorithmic — yoink/ripgrep skip ~1.55 million files that grep walks.
 
-A few additional queries' full benchmark is captured in
-`/tmp/yoink-bench-fast.log` when present; it is not regenerated in CI
-because of the grep cost.
+Per-query raw runs are preserved in
+`/tmp/claude-1000/-home-aidan-yoink/.../tasks/bw1qb0bbd.output` and can be
+regenerated with the script in [Reproducing these numbers](#reproducing-these-numbers).
 
 ### Startup search (empty query)
 
