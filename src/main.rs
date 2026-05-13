@@ -1,4 +1,5 @@
 mod actions;
+mod blame;
 mod cli;
 mod search;
 mod ui;
@@ -6,7 +7,7 @@ mod ui;
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, InternalCommand};
-use search::{build_search_entries, format_search_entries};
+use search::{run_blame_collect, run_search_streaming};
 use std::env;
 use which::which;
 
@@ -22,14 +23,29 @@ fn run() -> Result<()> {
     match cli.internal {
         Some(InternalCommand::Search { query }) => {
             ensure_dependency("rg")?;
-            let entries = build_search_entries(&query, &cwd)?;
-            print!("{}", format_search_entries(&entries));
+            run_search_streaming(&query, &cwd)?;
             return Ok(());
         }
         Some(InternalCommand::Preview { path, query, line }) => {
             ensure_dependency("bat")?;
             ensure_dependency("rg")?;
             return ui::run_preview(&cwd, &path, &query, line);
+        }
+        Some(InternalCommand::ToggleBlame) => {
+            let _ = blame::toggle_blame_sort();
+            return Ok(());
+        }
+        Some(InternalCommand::Prompt) => {
+            if blame::blame_sort_active() {
+                print!("blame> ");
+            } else {
+                print!("regex> ");
+            }
+            return Ok(());
+        }
+        Some(InternalCommand::BlameCollect { query }) => {
+            ensure_dependency("rg")?;
+            return run_blame_collect(&query, &cwd);
         }
         None => {}
     }

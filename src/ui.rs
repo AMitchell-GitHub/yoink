@@ -1,4 +1,5 @@
 use crate::actions::{open_in_editor, resolve_target_dir};
+use crate::blame::BLAME_SORT_ENV;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,9 +8,18 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
     let exe = exe_path.to_string_lossy();
     let preview = format!("{} __preview {{2}} {{q}} {{3}}", exe);
     let reload = format!("{} __search {{q}}", exe);
+    let toggle = format!("{} __toggle_blame", exe);
+    let blame_collect = format!("{} __blame_collect {{q}}", exe);
+    let prompt_cmd = format!("{} __prompt", exe);
+
+    // Per-session state file used to flag blame-sort mode. Ensure it does not
+    // exist at startup so we begin in regex mode.
+    let state_file = std::env::temp_dir().join(format!("yoink-blame-{}", std::process::id()));
+    let _ = std::fs::remove_file(&state_file);
 
     let mut command = Command::new("fzf");
     command
+        .env(BLAME_SORT_ENV, &state_file)
         .arg("--ansi")
         .arg("--delimiter")
         .arg("\t")
@@ -18,7 +28,7 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
         .arg("--layout=reverse")
         .arg("--height=100%")
         .arg("--header")
-        .arg("Enter: cd to container  |  Ctrl-V: vim  |  Ctrl-O: code  |  Ctrl-S: subl")
+        .arg("Enter: cd  |  Ctrl-V: vim  |  Ctrl-O: code  |  Ctrl-S: subl  |  Ctrl-B: blame-sort")
         .arg("--preview-window=right:65%:wrap")
         .arg("--preview")
         .arg(preview)
@@ -29,6 +39,17 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
         .arg(format!("start:reload:{reload}"))
         .arg("--bind")
         .arg(format!("change:reload:{reload}"))
+        // Ctrl-B sequence:
+        //   1. flip the blame-mode state file (silent),
+        //   2. hand the terminal to `__blame_collect` so it can draw an
+        //      in-place progress bar while it pre-populates the blame cache
+        //      (this is a no-op exit when the toggle just turned blame OFF),
+        //   3. reload the list — `__search` now reads from the warm cache,
+        //   4. update the prompt label.
+        .arg("--bind")
+        .arg(format!(
+            "ctrl-b:execute-silent({toggle})+execute({blame_collect})+reload({reload})+transform-prompt({prompt_cmd})"
+        ))
         .arg("--prompt")
         .arg("regex> ")
         .current_dir(cwd);
@@ -40,6 +61,9 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
     let output = command
         .output()
         .context("failed to execute fzf for interactive selection")?;
+
+    let _ = std::fs::remove_file(&state_file);
+    crate::blame::clear_blame_cache();
 
     if !output.status.success() {
         return Ok(());
@@ -171,6 +195,8 @@ pub fn run_preview(
         bat.arg("--line-range=:300");
     }
 
+    print_blame_header(cwd, Path::new(selected_rel_path), selected_line);
+
     let status = bat
         .arg(&full)
         .status()
@@ -186,6 +212,50 @@ pub fn run_preview(
     }
 
     Ok(())
+}
+
+fn print_blame_header(cwd: &Path, rel: &Path, line: Option<usize>) {
+    use crate::blame::{
+        blame_line_summary, file_last_touched_verbose, format_unix_date, git_toplevel,
+    };
+
+    print!("\x1b[1;33m📜 git blame\x1b[0m  ");
+
+    // First make sure we're actually inside a git repo. If not, surface the
+    // real reason so the user can see why blame is unavailable.
+    match git_toplevel(cwd) {
+        Err(err) => {
+            println!("\x1b[1;31mgit unavailable here\x1b[0m");
+            println!("\x1b[2;37mcwd:\x1b[0m {}", cwd.display());
+            println!("\x1b[2;37mgit:\x1b[0m {err}");
+            println!("\x1b[2;37m────────────────────────────────────────\x1b[0m");
+            return;
+        }
+        Ok(top) => {
+            if let Some(line) = line {
+                if let Some(summary) = blame_line_summary(cwd, rel, line) {
+                    println!("\x1b[1;36mL{line}\x1b[0m  \x1b[37m{summary}\x1b[0m");
+                    println!("\x1b[2;37m────────────────────────────────────────\x1b[0m");
+                    return;
+                }
+            }
+            match file_last_touched_verbose(cwd, rel) {
+                Ok(ts) => {
+                    println!(
+                        "\x1b[37mlast touched\x1b[0m \x1b[1;35m{}\x1b[0m",
+                        format_unix_date(ts)
+                    );
+                }
+                Err(err) => {
+                    println!("\x1b[1;31mblame unavailable\x1b[0m");
+                    println!("\x1b[2;37mrepo:\x1b[0m {top}");
+                    println!("\x1b[2;37mfile:\x1b[0m {}", rel.display());
+                    println!("\x1b[2;37mgit:\x1b[0m  {err}");
+                }
+            }
+        }
+    }
+    println!("\x1b[2;37m────────────────────────────────────────\x1b[0m");
 }
 
 pub fn current_exe() -> Result<PathBuf> {
