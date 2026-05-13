@@ -36,4 +36,12 @@ pub enum InternalCommand {
         #[arg(default_value = "")]
         query: String,
     },
+    #[command(name = "__copy", hide = true)]
+    Copy {
+        /// "relative" or "filename"
+        mode: String,
+        path: String,
+        #[arg(default_value = "")]
+        line: String,
+    },
 }

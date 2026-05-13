@@ -47,6 +47,25 @@ fn run() -> Result<()> {
             ensure_dependency("rg")?;
             return run_blame_collect(&query, &cwd);
         }
+        Some(InternalCommand::Copy { mode, path, line }) => {
+            let base = if mode == "filename" {
+                std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or(path)
+            } else {
+                path
+            };
+            let text = if line.is_empty() {
+                base
+            } else {
+                format!("{base}:{line}")
+            };
+            if let Err(error) = actions::copy_to_clipboard(&text) {
+                eprintln!("yoink copy error: {error}");
+            }
+            return Ok(());
+        }
         None => {}
     }
 
