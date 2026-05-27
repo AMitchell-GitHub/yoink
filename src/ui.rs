@@ -11,6 +11,8 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
     let toggle = format!("{} __toggle_blame", exe);
     let blame_collect = format!("{} __blame_collect {{q}}", exe);
     let prompt_cmd = format!("{} __prompt", exe);
+    let copy_rel = format!("{exe} __copy relative {{2}} {{3}}");
+    let copy_name = format!("{exe} __copy filename {{2}} {{3}}");
 
     // Per-session state file used to flag blame-sort mode. Ensure it does not
     // exist at startup so we begin in regex mode.
@@ -26,6 +28,8 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
     let cache_dir = std::env::temp_dir().join(format!("yoink-cache-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache_dir);
 
+    let header = "Enter: cd  |  Ctrl-V: vim  |  Ctrl-O: code  |  Ctrl-S: subl  |  Ctrl-B: blame-sort  |  Ctrl-Y: copy path  |  Ctrl-F: copy name";
+
     let mut command = Command::new("fzf");
     command
         .env(BLAME_SORT_ENV, &state_file)
@@ -38,7 +42,7 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
         .arg("--layout=reverse")
         .arg("--height=100%")
         .arg("--header")
-        .arg("Enter: cd  |  Ctrl-V: vim  |  Ctrl-O: code  |  Ctrl-S: subl  |  Ctrl-B: blame-sort")
+        .arg(header)
         .arg("--preview-window=right:65%:wrap")
         .arg("--preview")
         .arg(preview)
@@ -48,7 +52,7 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
         .arg("--bind")
         .arg(format!("start:reload:{reload}"))
         .arg("--bind")
-        .arg(format!("change:reload:{reload}"))
+        .arg(format!("change:reload({reload})+change-header({header})"))
         // Ctrl-B sequence:
         //   1. flip the blame-mode state file (silent),
         //   2. hand the terminal to `__blame_collect` so it can draw an
@@ -60,6 +64,10 @@ pub fn run_fzf_session(initial_query: Option<&str>, cwd: &Path, exe_path: &Path)
         .arg(format!(
             "ctrl-b:execute-silent({toggle})+execute({blame_collect})+reload({reload})+transform-prompt({prompt_cmd})"
         ))
+        .arg("--bind")
+        .arg(format!("ctrl-y:execute-silent({copy_rel})+change-header(\u{1F4CB} {{2}})"))
+        .arg("--bind")
+        .arg(format!("ctrl-f:execute-silent({copy_name})+change-header(\u{1F4CB} {{2}})"))
         .arg("--prompt")
         .arg("regex> ")
         .current_dir(cwd);

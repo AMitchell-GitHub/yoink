@@ -27,3 +27,38 @@ pub fn open_in_editor(editor_cmd: &str, cwd: &Path, selected_rel_path: &str) -> 
 
     Ok(())
 }
+
+pub fn copy_to_clipboard(text: &str) -> Result<()> {
+    let (cmd, args) = detect_clipboard()?;
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to spawn clipboard command: {cmd}"))?;
+    use std::io::Write;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(text.as_bytes())
+            .context("failed to write to clipboard command stdin")?;
+    }
+    let status = child.wait().context("clipboard command did not complete")?;
+    if !status.success() {
+        anyhow::bail!("clipboard command exited with status {status}");
+    }
+    Ok(())
+}
+
+fn detect_clipboard() -> Result<(&'static str, &'static [&'static str])> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() && which("wl-copy").is_ok() {
+        return Ok(("wl-copy", &[]));
+    }
+    if which("xclip").is_ok() {
+        return Ok(("xclip", &["-selection", "clipboard"]));
+    }
+    if which("xsel").is_ok() {
+        return Ok(("xsel", &["--clipboard", "--input"]));
+    }
+    anyhow::bail!(
+        "no clipboard tool found; install xclip or xsel (X11) or wl-clipboard (Wayland)"
+    )
+}
