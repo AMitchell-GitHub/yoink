@@ -1,13 +1,15 @@
 mod actions;
 mod blame;
 mod cli;
+mod keys;
 mod search;
-mod ui;
+mod settings;
+mod tui;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, InternalCommand};
-use search::{run_blame_collect, run_search_streaming};
+use search::run_search_streaming;
 use std::env;
 use which::which;
 
@@ -25,27 +27,6 @@ fn run() -> Result<()> {
             ensure_dependency("rg")?;
             run_search_streaming(&query, &cwd)?;
             return Ok(());
-        }
-        Some(InternalCommand::Preview { path, query, line }) => {
-            ensure_dependency("bat")?;
-            ensure_dependency("rg")?;
-            return ui::run_preview(&cwd, &path, &query, line);
-        }
-        Some(InternalCommand::ToggleBlame) => {
-            let _ = blame::toggle_blame_sort();
-            return Ok(());
-        }
-        Some(InternalCommand::Prompt) => {
-            if blame::blame_sort_active() {
-                print!("blame> ");
-            } else {
-                print!("regex> ");
-            }
-            return Ok(());
-        }
-        Some(InternalCommand::BlameCollect { query }) => {
-            ensure_dependency("rg")?;
-            return run_blame_collect(&query, &cwd);
         }
         Some(InternalCommand::Copy { mode, path, line }) => {
             let base = if mode == "filename" {
@@ -69,12 +50,10 @@ fn run() -> Result<()> {
         None => {}
     }
 
-    ensure_dependency("fzf")?;
     ensure_dependency("rg")?;
     ensure_dependency("bat")?;
 
-    let exe = ui::current_exe()?;
-    ui::run_fzf_session(cli.query.as_deref(), &cwd, &exe)?;
+    tui::run_session(cli.query.as_deref(), &cwd)?;
 
     Ok(())
 }

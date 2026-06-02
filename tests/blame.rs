@@ -9,10 +9,9 @@ use std::sync::{Mutex, OnceLock};
 
 use tempfile::tempdir;
 use yoink::blame::{
-    blame_for_file, blame_for_file_cached, blame_for_line_cached, blame_sort_active,
-    clear_session_cache, file_last_touched, find_repo_root, format_unix_date,
-    latest_change_from_map, line_summary_from_map, session_cache_dir, state_file_path,
-    toggle_blame_sort, try_blame_from_cache, BLAME_SORT_ENV, SESSION_CACHE_ENV,
+    blame_for_file, blame_for_file_cached, blame_for_line_cached, clear_session_cache,
+    file_last_touched, find_repo_root, format_unix_date, latest_change_from_map,
+    line_summary_from_map, session_cache_dir, try_blame_from_cache, SESSION_CACHE_ENV,
 };
 
 // All blame tests touch the process environment (cache dir + state file env
@@ -25,7 +24,6 @@ fn env_lock() -> &'static Mutex<()> {
 struct EnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     cache_dir: PathBuf,
-    state_file: PathBuf,
 }
 
 impl EnvGuard {
@@ -33,13 +31,10 @@ impl EnvGuard {
         let lock = env_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir").into_path();
         let cache_dir = temp.join("cache");
-        let state_file = temp.join("state");
         std::env::set_var(SESSION_CACHE_ENV, &cache_dir);
-        std::env::set_var(BLAME_SORT_ENV, &state_file);
         Self {
             _lock: lock,
             cache_dir,
-            state_file,
         }
     }
 }
@@ -47,9 +42,7 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         std::env::remove_var(SESSION_CACHE_ENV);
-        std::env::remove_var(BLAME_SORT_ENV);
         let _ = fs::remove_dir_all(&self.cache_dir);
-        let _ = fs::remove_file(&self.state_file);
     }
 }
 
@@ -135,33 +128,13 @@ fn format_unix_date_handles_negative_timestamps() {
 }
 
 // ---------------------------------------------------------------------------
-// session_cache_dir / state_file_path / toggle / blame_sort_active
+// session_cache_dir / clear_session_cache
 // ---------------------------------------------------------------------------
 
 #[test]
 fn session_cache_dir_returns_env_var_value_when_set() {
     let guard = EnvGuard::new();
     assert_eq!(session_cache_dir(), Some(guard.cache_dir.clone()));
-}
-
-#[test]
-fn state_file_path_returns_env_var_value_when_set() {
-    let guard = EnvGuard::new();
-    assert_eq!(state_file_path(), Some(guard.state_file.clone()));
-}
-
-#[test]
-fn blame_sort_active_reflects_state_file_existence() {
-    let _guard = EnvGuard::new();
-    assert!(!blame_sort_active(), "fresh env should start inactive");
-
-    let entered = toggle_blame_sort().expect("toggle on");
-    assert!(entered);
-    assert!(blame_sort_active(), "active after first toggle");
-
-    let exited = toggle_blame_sort().expect("toggle off");
-    assert!(!exited);
-    assert!(!blame_sort_active(), "inactive after second toggle");
 }
 
 #[test]

@@ -1,0 +1,2 @@
+ - I cannot manually type (?i) for regex and similar because of the ? for keybinds
+ - regex search and glob search seem too aligned -- I search for test.*wes.*acp and get nothing, but searching for test*wes*acp works. this should only work for glob not regex

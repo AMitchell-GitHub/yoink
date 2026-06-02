@@ -1,5 +1,7 @@
 pub mod actions;
 pub mod blame;
 pub mod cli;
+pub mod keys;
 pub mod search;
-pub mod ui;
+pub mod settings;
+pub mod tui;

@@ -42,14 +42,23 @@ fn env_lock() -> &'static Mutex<()> {
 }
 
 fn with_system_config(config_content: &str, test_fn: impl FnOnce(&Path)) {
-    let _guard = env_lock().lock().expect("env lock");
+    // Recover from any poisoning so one failing test doesn't cascade into
+    // the rest. We don't share mutable state across tests; the mutex only
+    // serializes env-var mutation.
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let temp_home = tempdir().expect("temp home");
-    let config_path = temp_home.path().join(".yoinkignore");
-    fs::write(&config_path, config_content).expect("write config");
+    let config_path = temp_home.path().join(".yoink-config");
+    // Pin the legacy regex + case-sensitive behavior these tests were
+    // written against; the runtime default is now case-insensitive glob,
+    // which would change match semantics out from under them.
+    let pinned = format!("search_mode=regex\ncase_sensitive=true\n{config_content}");
+    fs::write(&config_path, pinned).expect("write config");
 
-    std::env::set_var("YOINKIGNORE_PATH", &config_path);
+    std::env::set_var("YOINK_CONFIG_PATH", &config_path);
     test_fn(temp_home.path());
-    std::env::remove_var("YOINKIGNORE_PATH");
+    std::env::remove_var("YOINK_CONFIG_PATH");
 }
 
 #[test]
@@ -131,8 +140,8 @@ fn respects_yoinkignore_patterns() {
 }
 
 #[test]
-fn applies_builtin_default_ignores() {
-    with_system_config("", |_| {
+fn applies_configured_ignore_globs() {
+    with_system_config(".git/**\nnode_modules/**\n", |_| {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
 
@@ -212,7 +221,7 @@ fn sorts_by_depth_then_alphabetical() {
 
 #[test]
 fn sorts_alphabetically_when_configured() {
-    with_system_config("sort_mode=alphabetical\n.git/**\nnode_modules/**\n", |_| {
+    with_system_config("sort=alphabetical\n.git/**\nnode_modules/**\n", |_| {
         let dir = tempdir().expect("tempdir");
         let root = dir.path();
 

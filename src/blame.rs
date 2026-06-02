@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::search::{Sort, YoinkSettings};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::env;
@@ -7,36 +7,48 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const BLAME_SORT_ENV: &str = "YOINK_BLAME_SORT_FILE";
 /// Per-fzf-session cache directory env var. Set unconditionally by
 /// `ui::run_fzf_session` so blame results can be cached regardless of whether
 /// the user has toggled blame-sort mode — that way previewing many files in
 /// regular search mode only pays the git-blame cost once per file.
 pub const SESSION_CACHE_ENV: &str = "YOINK_CACHE_DIR";
 
-pub fn state_file_path() -> Option<PathBuf> {
-    env::var_os(BLAME_SORT_ENV).map(PathBuf::from)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlameOrder {
+    Youngest,
+    Oldest,
 }
 
-pub fn blame_sort_active() -> bool {
-    state_file_path()
-        .map(|path| path.exists())
-        .unwrap_or(false)
+impl BlameOrder {
+    pub fn from_sort(sort: Sort) -> BlameOrder {
+        match sort {
+            Sort::BlameOld => BlameOrder::Oldest,
+            // Default + BlameYoung both map to youngest-first if blame is on.
+            _ => BlameOrder::Youngest,
+        }
+    }
+}
+
+pub fn blame_sort_active(settings: &YoinkSettings) -> bool {
+    matches!(settings.sort, Sort::BlameYoung | Sort::BlameOld)
 }
 
 pub fn session_cache_dir() -> Option<PathBuf> {
     env::var_os(SESSION_CACHE_ENV).map(PathBuf::from)
 }
 
+#[allow(dead_code)]
 pub fn clear_session_cache() {
     if let Some(dir) = session_cache_dir() {
         let _ = fs::remove_dir_all(&dir);
     }
 }
 
-/// Back-compat name used by `__blame_collect` when toggling blame-sort ON, to
-/// force fresh blame data (mtime-based invalidation might miss mid-session
-/// commits where the working file is unchanged).
+/// Exposed as a public API for callers that want to force fresh blame data
+/// (e.g. after an external `git reset` mid-session). The TUI does not call
+/// this — `blame_times_cached` already invalidates per-file on mtime
+/// change, which is correct for ordinary editing.
+#[allow(dead_code)]
 pub fn clear_blame_cache() {
     clear_session_cache();
 }
@@ -292,19 +304,6 @@ fn parse_cache_blob(content: &str) -> HashMap<usize, LineBlame> {
         );
     }
     map
-}
-
-pub fn toggle_blame_sort() -> Result<bool> {
-    let Some(path) = state_file_path() else {
-        return Ok(false);
-    };
-    if path.exists() {
-        let _ = fs::remove_file(&path);
-        Ok(false)
-    } else {
-        fs::write(&path, b"1")?;
-        Ok(true)
-    }
 }
 
 /// Walk up from `start` looking for a `.git` entry (directory for normal

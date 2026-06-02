@@ -1,0 +1,128 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# yoink config
+# ═════════════════════════════════════════════════════════════════════════════
+# This is the only file yoink reads. Edit it freely — yoink reloads as soon
+# as you save and quit your editor. Lines starting with `#` are comments;
+# every other line is either `key = value` or, in the ignore section, a glob
+# pattern.
+#
+# Reopen this file from inside yoink with  F2 → "Edit config file".
+# Browse the shipped reference with        F2 → "Show default config".
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+# ─── defaults ────────────────────────────────────────────────────────────────
+# These are the modes yoink starts in on every launch.
+#
+# Inside the tool, F3 / F4 / F5 open pickers that change these for the CURRENT
+# SESSION only — they do not change the defaults below. To change the
+# persistent default, either edit this file directly or use F2 → edit the
+# values → Save.
+
+# Query language used to interpret what you type:
+#   glob   — newcomer-friendly. `*` matches anything, `?` matches one char.
+#            Translated to a regex under the hood, so it searches inside
+#            file contents too, not just file/folder names.
+#   regex  — full regex on names and contents.
+search_mode = glob
+
+# Case sensitivity for both name and content matching:
+#   false  — case-insensitive (yoink shows `(?i)` in the prompt so you can
+#            see the regex form being applied).
+#   true   — exact case.
+case_sensitive = false
+
+# Sort order for the results list:
+#   depth         — shallow paths first, then alphabetical within each depth
+#   alphabetical  — pure alphabetical
+#   blame_young   — youngest `git blame` first (across all matching lines)
+#   blame_old     — oldest `git blame` first
+sort = depth
+
+
+# ─── walking ─────────────────────────────────────────────────────────────────
+# What yoink does and doesn't descend into during a search. These mirror
+# the equivalent ripgrep flags.
+
+# Include dotfiles and dot-directories (e.g. .env, .config/) in the search?
+include_hidden = false
+
+# Cross filesystem boundaries (mounted drives, fuse mounts)?
+include_mounts = false
+
+# Follow symbolic links?
+include_symlinks = false
+
+
+# ─── ignored paths ───────────────────────────────────────────────────────────
+# Glob patterns. Any file or folder whose path matches one of these is
+# skipped during the search — no walking into it, no matches from it.
+# One pattern per line. `**` matches any number of path components.
+
+.git/**
+node_modules/**
+
+
+# ─── keybinds ────────────────────────────────────────────────────────────────
+# Map a key to an action. Format:  bind.<key> = <action>
+#
+# EVERY key behavior is opt-in: a key does nothing unless there's a bind line
+# for it here. There are no default Ctrl-chords — if you want Ctrl-U to clear
+# the query, you bind it. Delete what you don't want; add what you do.
+#
+# The only keys you can't rebind are the built-ins:
+#   ↑ ↓ PgUp PgDn Home End   move the result list
+#   Enter                    run the search
+#   Esc                      close an overlay
+#   F1                       help        F2  settings
+#   F3                       search-mode picker (session)
+#   F4                       case picker (session)
+#   F5                       sort picker (session)
+#   Ctrl-C                   quit
+# (`?` is NOT built-in, so it reaches the query — glob wildcard / regex `(?i)`.)
+#
+# Keys can be:
+#   • plain letters or punctuation:  a   ?
+#   • modified:                      ctrl-o   alt-e   shift-tab
+#   • named:                         enter  esc  tab  backspace  space
+#                                    up  down  left  right
+#                                    home  end  pageup  pagedown
+#                                    insert  delete  f1 .. f12
+#
+# Actions that act on the highlighted result:
+#   cd         cd into the highlighted folder, or its parent if it's a file.
+#              yoink exits and your shell wrapper changes directory.
+#   vim, vi    open in the terminal editor; you return to yoink on quit.
+#   nano       same idea, in nano.
+#   cat        cat the file. Returns to yoink.
+#   vscode     launch VS Code (`code` command). yoink stays open.
+#   sublime    launch Sublime Text (`subl`). yoink stays open.
+#   explorer   open with the system default app (`xdg-open`). yoink stays open.
+#   copy_path  copy the file's full disk path to the clipboard.
+#   copy_name  copy just the file's name (no directory) to the clipboard.
+#
+# Actions that edit the query box (no result needed):
+#   clear_query  clear the whole query
+#   delete_word  delete the word before the cursor
+#   line_start   move the cursor to the start of the query
+#   line_end     move the cursor to the end of the query
+#
+# If two bind lines (or a bind and a built-in) share a key, the built-in — or
+# else the first matching line — wins and the rest do nothing. yoink warns you
+# at startup if it spots any such collision.
+
+bind.ctrl-d = cd
+bind.ctrl-o = vscode
+bind.ctrl-s = sublime
+bind.ctrl-x = explorer
+bind.ctrl-v = vim
+bind.ctrl-n = nano
+bind.ctrl-y = copy_path
+bind.ctrl-f = copy_name
+
+# Query editing — only clear_query is wired up by default. Uncomment any of
+# the others (or pick your own keys) to enable them:
+bind.ctrl-u = clear_query
+# bind.ctrl-w = delete_word
+# bind.ctrl-a = line_start
+# bind.ctrl-e = line_end

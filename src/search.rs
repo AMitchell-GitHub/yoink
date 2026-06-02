@@ -1,35 +1,83 @@
+use crate::actions::Action;
 use crate::blame::{
-    blame_sort_active, blame_times_cached, find_repo_root, format_unix_date,
+    blame_sort_active, blame_times_cached, find_repo_root, format_unix_date, BlameOrder,
 };
-use std::io::{BufRead, BufReader, Write};
-use std::process::Stdio;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use walkdir::WalkDir;
 
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::MetadataExt;
 
-// Patterns are matched against the relative path of each walk entry. To prune
-// directories at *any* depth (not just at the cwd root), the pattern must match
-// the directory's path itself — `**/name` — so `WalkDir::filter_entry` can
-// return `false` and skip descending. The previous `name/**` form only matched
-// children, which means we used to walk into every nested `node_modules` and
-// `.git` before filtering individual files. In a tree with many sub-repos this
-// added seconds per search.
 const DEFAULT_IGNORE_GLOBS: &[&str] = &["**/.git", "**/node_modules"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SortMode {
+pub enum SearchMode {
+    Glob,
+    Regex,
+}
+
+impl SearchMode {
+    pub fn token(self) -> &'static str {
+        match self {
+            SearchMode::Glob => "glob",
+            SearchMode::Regex => "regex",
+        }
+    }
+
+    fn from_token(value: &str) -> Option<SearchMode> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "glob" => Some(SearchMode::Glob),
+            "regex" => Some(SearchMode::Regex),
+            _ => None,
+        }
+    }
+}
+
+/// Unified sort selector — one config key, four values. `Depth` and
+/// `Alphabetical` are pure path orderings; `BlameYoung` and `BlameOld`
+/// reorder by per-line `git blame` timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sort {
     Depth,
     Alphabetical,
+    BlameYoung,
+    BlameOld,
 }
+
+impl Sort {
+    pub fn token(self) -> &'static str {
+        match self {
+            Sort::Depth => "depth",
+            Sort::Alphabetical => "alphabetical",
+            Sort::BlameYoung => "blame_young",
+            Sort::BlameOld => "blame_old",
+        }
+    }
+
+    fn from_token(value: &str) -> Option<Sort> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "depth" => Some(Sort::Depth),
+            "alphabetical" | "alpha" => Some(Sort::Alphabetical),
+            "blame_young" | "blame-young" | "blame_youngest" => Some(Sort::BlameYoung),
+            "blame_old" | "blame-old" | "blame_oldest" => Some(Sort::BlameOld),
+            _ => None,
+        }
+    }
+}
+
+/// Every configurable keybind, result-action *and* query-editing alike, in the
+/// order it appears in the config. A key does nothing unless it's listed here —
+/// there are no built-in defaults for `ctrl-*` chords. The only fixed keys are
+/// the reserved built-ins (F1–F5 / Esc / Enter / Ctrl-C / nav).
+pub type Binds = Vec<(String, Action)>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
@@ -40,13 +88,19 @@ pub struct Candidate {
 }
 
 #[derive(Debug, Clone)]
-struct YoinkSettings {
+pub struct YoinkSettings {
     include_hidden: bool,
     include_mounts: bool,
     include_symlinks: bool,
-    sort_mode: SortMode,
     globset: GlobSet,
     globs: Vec<String>,
+    pub search_mode: SearchMode,
+    pub case_sensitive: bool,
+    pub sort: Sort,
+    pub binds: Binds,
+    /// Path the settings were loaded from (or would be written to if config
+    /// doesn't exist yet). `None` if no $HOME is available.
+    pub source_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,36 +132,42 @@ fn parse_bool_setting(value: &str) -> Option<bool> {
     }
 }
 
-fn parse_sort_mode_setting(value: &str) -> Option<SortMode> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "depth" => Some(SortMode::Depth),
-        "alphabetical" => Some(SortMode::Alphabetical),
-        _ => None,
+/// Resolve the active config path. Single source of truth — there is no
+/// legacy fallback. Read and write target are the same.
+///   1. `$YOINK_CONFIG_PATH` (env override, primarily for tests)
+///   2. `$HOME/.yoink-config`
+///
+/// Returns `None` only if there's no `$HOME` and no override.
+pub fn config_path() -> Option<PathBuf> {
+    if let Some(p) = env::var_os("YOINK_CONFIG_PATH") {
+        return Some(PathBuf::from(p));
     }
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    Some(home.join(".yoink-config"))
 }
 
-fn yoinkignore_path() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("YOINKIGNORE_PATH") {
-        return Some(PathBuf::from(path));
-    }
-
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".yoinkignore"))
-}
-
-fn load_settings() -> Result<YoinkSettings> {
+pub fn load_settings() -> Result<YoinkSettings> {
     let mut include_hidden = false;
     let mut include_mounts = false;
     let mut include_symlinks = false;
-    let mut sort_mode = SortMode::Depth;
-    let mut globs: Vec<String> = DEFAULT_IGNORE_GLOBS
-        .iter()
-        .map(|pattern| pattern.to_string())
-        .collect();
+    let mut search_mode = SearchMode::Glob;
+    let mut case_sensitive = false;
+    let mut sort = Sort::Depth;
+    let mut binds: Binds = Vec::new();
+    // Globs default to the built-in safe set when no config exists at all
+    // (e.g. the `yoink __search` headless path with no $HOME). Once a config
+    // file is read, *its* globs are the source of truth — even if it lists
+    // none, we honor that.
+    let mut globs: Vec<String> = Vec::new();
+    let mut config_was_read = false;
 
-    if let Some(ignore_file) = yoinkignore_path() {
-        if ignore_file.exists() {
-            let content = fs::read_to_string(&ignore_file)
-                .with_context(|| format!("failed to read {}", ignore_file.display()))?;
+    let source = config_path();
+
+    if let Some(ref config_file) = source {
+        if config_file.exists() {
+            config_was_read = true;
+            let content = fs::read_to_string(config_file)
+                .with_context(|| format!("failed to read {}", config_file.display()))?;
 
             for line in content.lines() {
                 let trimmed = line.trim();
@@ -118,28 +178,71 @@ fn load_settings() -> Result<YoinkSettings> {
                 if let Some((raw_key, raw_value)) = trimmed.split_once('=') {
                     let key = raw_key.trim().to_ascii_lowercase();
                     let value = raw_value.trim();
+
+                    if let Some(bind_key) = key.strip_prefix("bind.") {
+                        if let Some(action) = Action::from_token(value) {
+                            binds.push((bind_key.to_string(), action));
+                        } else {
+                            eprintln!(
+                                "yoink config: unknown action `{value}` for bind `{bind_key}` in {}",
+                                config_file.display()
+                            );
+                        }
+                        continue;
+                    }
+
                     match key.as_str() {
                         "include_hidden" => {
                             include_hidden = parse_bool_setting(value).with_context(|| {
-                                format!("invalid include_hidden value in {}: {value}", ignore_file.display())
+                                format!(
+                                    "invalid include_hidden value in {}: {value}",
+                                    config_file.display()
+                                )
                             })?;
                             continue;
                         }
                         "include_mounts" => {
                             include_mounts = parse_bool_setting(value).with_context(|| {
-                                format!("invalid include_mounts value in {}: {value}", ignore_file.display())
+                                format!(
+                                    "invalid include_mounts value in {}: {value}",
+                                    config_file.display()
+                                )
                             })?;
                             continue;
                         }
                         "include_symlinks" => {
                             include_symlinks = parse_bool_setting(value).with_context(|| {
-                                format!("invalid include_symlinks value in {}: {value}", ignore_file.display())
+                                format!(
+                                    "invalid include_symlinks value in {}: {value}",
+                                    config_file.display()
+                                )
                             })?;
                             continue;
                         }
-                        "sort_mode" => {
-                            sort_mode = parse_sort_mode_setting(value).with_context(|| {
-                                format!("invalid sort_mode value in {}: {value}", ignore_file.display())
+                        "search_mode" => {
+                            search_mode = SearchMode::from_token(value).with_context(|| {
+                                format!(
+                                    "invalid search_mode value in {}: {value} (expected glob|regex)",
+                                    config_file.display()
+                                )
+                            })?;
+                            continue;
+                        }
+                        "case_sensitive" => {
+                            case_sensitive = parse_bool_setting(value).with_context(|| {
+                                format!(
+                                    "invalid case_sensitive value in {}: {value}",
+                                    config_file.display()
+                                )
+                            })?;
+                            continue;
+                        }
+                        "sort" => {
+                            sort = Sort::from_token(value).with_context(|| {
+                                format!(
+                                    "invalid sort value in {}: {value} (expected depth|alphabetical|blame_young|blame_old)",
+                                    config_file.display()
+                                )
                             })?;
                             continue;
                         }
@@ -152,11 +255,17 @@ fn load_settings() -> Result<YoinkSettings> {
         }
     }
 
+    if !config_was_read {
+        // No config file yet — fall back to the safe built-in ignore set so
+        // a stray `yoink __search` doesn't walk into `.git` and explode.
+        globs.extend(DEFAULT_IGNORE_GLOBS.iter().map(|s| s.to_string()));
+    }
+
     let mut builder = GlobSetBuilder::new();
     for pattern in &globs {
         builder.add(
             Glob::new(pattern)
-                .with_context(|| format!("invalid ~/.yoinkignore glob: {pattern}"))?,
+                .with_context(|| format!("invalid ignore glob: {pattern}"))?,
         );
     }
 
@@ -165,18 +274,69 @@ fn load_settings() -> Result<YoinkSettings> {
         include_hidden,
         include_mounts,
         include_symlinks,
-        sort_mode,
         globset,
         globs,
+        search_mode,
+        case_sensitive,
+        sort,
+        binds,
+        source_path: source,
     })
 }
 
-/// Walk the directory tree and return path-name matches as `Candidate`s.
-/// Does NOT run rg — only directory traversal with regex filtering on
-/// path components. This is the fast half of `build_search_entries`, and is
-/// also used as the first step of `build_candidates`.
-fn walk_path_candidates(
+/// Translate the user's query into a single regex string used everywhere —
+/// the rust path-walk matcher, the rg content invocation, and the highlight
+/// regex. In regex mode this is the query verbatim. In glob mode the query
+/// is glob-translated to a regex with anchors stripped (so it matches
+/// substring-style, like the rest of the pipeline). Case-insensitivity is
+/// applied with a `(?i)` prefix so a single string carries the flag through
+/// to both `regex::Regex` and `rg`.
+pub fn effective_pattern(
     query: &str,
+    mode: SearchMode,
+    case_sensitive: bool,
+) -> Result<String> {
+    if query.is_empty() {
+        return Ok(String::new());
+    }
+
+    let raw = match mode {
+        SearchMode::Regex => query.to_string(),
+        SearchMode::Glob => glob_to_regex(query)?,
+    };
+
+    if case_sensitive {
+        Ok(raw)
+    } else {
+        Ok(format!("(?i){raw}"))
+    }
+}
+
+/// Convert a glob query into an unanchored regex. Built on top of
+/// `globset::Glob::regex()` which emits an anchored, byte-mode regex; we
+/// strip the leading `(?-u)` flag (we match against UTF-8 path strings and
+/// `rg` output lines, so the regex crate's default unicode mode is correct
+/// and required — combining `(?-u)` with `.*` triggers a "pattern can
+/// match invalid UTF-8" error against `Regex::new`) and the anchors so the
+/// resulting pattern matches substring-style (consistent with regex mode,
+/// where `rg` and `Regex::is_match` are unanchored by default).
+fn glob_to_regex(query: &str) -> Result<String> {
+    let glob = Glob::new(query).with_context(|| format!("invalid glob query: {query}"))?;
+    let mut re = glob.regex().to_string();
+    if let Some(rest) = re.strip_prefix("(?-u)") {
+        re = rest.to_string();
+    }
+    if re.starts_with('^') {
+        re.remove(0);
+    }
+    if re.ends_with('$') {
+        re.pop();
+    }
+    Ok(re)
+}
+
+fn walk_path_candidates(
+    pattern_re: Option<&Regex>,
     cwd: &Path,
     settings: &YoinkSettings,
 ) -> Result<HashMap<PathBuf, Candidate>> {
@@ -191,12 +351,6 @@ fn walk_path_candidates(
                 .with_context(|| format!("failed to stat search root: {}", cwd.display()))?
                 .dev(),
         )
-    };
-
-    let regex = if query.is_empty() {
-        None
-    } else {
-        Some(Regex::new(query).with_context(|| format!("invalid regex query: {query}"))?)
     };
 
     let iter = WalkDir::new(cwd)
@@ -254,7 +408,7 @@ fn walk_path_candidates(
             .map(|v| v.to_string_lossy())
             .unwrap_or_else(|| path_str.clone());
 
-        let is_match = match &regex {
+        let is_match = match pattern_re {
             None => true,
             Some(re) => re.is_match(&path_str) || re.is_match(&file_name),
         };
@@ -274,14 +428,38 @@ fn walk_path_candidates(
     Ok(map)
 }
 
-// Kept as a public API for the integration tests in tests/search.rs, which
-// assert combined path + content matching against small temp fixtures. The
-// optimized hot path used by the running binary lives in
-// `build_search_entries` and bypasses this function.
+/// Apply the file-walk options + ignore globs that are common across every
+/// `rg` invocation. Centralized so search_mode/case stay in lockstep across
+/// all three rg call sites.
+fn apply_rg_common_args(cmd: &mut Command, settings: &YoinkSettings) {
+    if settings.include_hidden {
+        cmd.arg("--hidden");
+    }
+    if !settings.include_mounts {
+        cmd.arg("--one-file-system");
+    }
+    if settings.include_symlinks {
+        cmd.arg("--follow");
+    }
+    for pattern in &settings.globs {
+        cmd.arg("-g").arg(format!("!{pattern}"));
+    }
+}
+
+/// Kept as a public API for the integration tests in tests/search.rs.
 #[allow(dead_code)]
 pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
     let settings = load_settings()?;
-    let mut map = walk_path_candidates(query, cwd, &settings)?;
+    let effective = effective_pattern(query, settings.search_mode, settings.case_sensitive)?;
+    let pattern_re = if effective.is_empty() {
+        None
+    } else {
+        Some(
+            Regex::new(&effective)
+                .with_context(|| format!("invalid regex query: {effective}"))?,
+        )
+    };
+    let mut map = walk_path_candidates(pattern_re.as_ref(), cwd, &settings)?;
 
     #[cfg(target_family = "unix")]
     let root_dev = if settings.include_mounts {
@@ -294,30 +472,15 @@ pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
         )
     };
 
-    if !query.is_empty() {
+    if !effective.is_empty() {
         let mut rg_command = Command::new("rg");
         rg_command
             .arg("-l")
             .arg("--color=never")
             .arg("--no-messages")
             .arg("-e")
-            .arg(query);
-
-        if settings.include_hidden {
-            rg_command.arg("--hidden");
-        }
-
-        if !settings.include_mounts {
-            rg_command.arg("--one-file-system");
-        }
-
-        if settings.include_symlinks {
-            rg_command.arg("--follow");
-        }
-
-        for pattern in &settings.globs {
-            rg_command.arg("-g").arg(format!("!{pattern}"));
-        }
+            .arg(&effective);
+        apply_rg_common_args(&mut rg_command, &settings);
 
         let output = rg_command
             .arg(".")
@@ -349,7 +512,6 @@ pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
             }
 
             let is_dir = full.is_dir();
-
             map.entry(rel.clone())
                 .and_modify(|candidate| candidate.content_match = true)
                 .or_insert(Candidate {
@@ -362,38 +524,43 @@ pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
     }
 
     let mut list: Vec<Candidate> = map.into_values().collect();
-    sort_candidates(&mut list, settings.sort_mode);
+    sort_candidates(&mut list, settings.sort);
     Ok(list)
 }
 
-pub fn build_search_entries(query: &str, cwd: &Path) -> Result<Vec<SearchEntry>> {
-    let settings = load_settings()?;
-    let highlight_re = if query.trim().is_empty() {
+pub fn build_search_entries(
+    query: &str,
+    cwd: &Path,
+    settings: &YoinkSettings,
+) -> Result<Vec<SearchEntry>> {
+    let effective = effective_pattern(query, settings.search_mode, settings.case_sensitive)?;
+
+    let highlight_re = if effective.is_empty() {
         None
     } else {
-        Regex::new(query).ok()
+        Regex::new(&effective).ok()
     };
 
-    // Run the filesystem walk (which finds path-name matches) and rg
-    // (which finds content matches with positions) in parallel — they're
-    // both I/O-heavy and independent, so doing them on separate threads
-    // roughly halves the search latency on big trees. We also no longer
-    // run a separate `rg -l` call inside the walk path: the data from
-    // `collect_occurrences` (rg -n --column) already tells us which files
-    // had content matches, so the older code was effectively running rg
-    // twice over the same tree.
-    let occ_handle = if query.trim().is_empty() {
+    let occ_handle = if effective.is_empty() {
         None
     } else {
-        let query_owned = query.to_string();
+        let pattern = effective.clone();
         let cwd_owned = cwd.to_path_buf();
         let settings_owned = settings.clone();
         Some(std::thread::spawn(move || {
-            collect_occurrences(&query_owned, &cwd_owned, &settings_owned)
+            collect_occurrences(&pattern, &cwd_owned, &settings_owned)
         }))
     };
 
-    let mut candidate_map = walk_path_candidates(query, cwd, &settings)?;
+    let walk_pattern = if effective.is_empty() {
+        None
+    } else {
+        Some(
+            Regex::new(&effective)
+                .with_context(|| format!("invalid regex query: {effective}"))?,
+        )
+    };
+    let mut candidate_map = walk_path_candidates(walk_pattern.as_ref(), cwd, settings)?;
 
     let occurrence_map = if let Some(handle) = occ_handle {
         match handle.join() {
@@ -405,8 +572,6 @@ pub fn build_search_entries(query: &str, cwd: &Path) -> Result<Vec<SearchEntry>>
         HashMap::new()
     };
 
-    // Merge: any file with occurrences but no path-name match becomes a
-    // content-only candidate.
     for path in occurrence_map.keys() {
         let full = cwd.join(path);
         let is_dir = full.is_dir();
@@ -422,7 +587,7 @@ pub fn build_search_entries(query: &str, cwd: &Path) -> Result<Vec<SearchEntry>>
     }
 
     let mut candidates: Vec<Candidate> = candidate_map.into_values().collect();
-    sort_candidates(&mut candidates, settings.sort_mode);
+    sort_candidates(&mut candidates, settings.sort);
 
     let mut entries = Vec::new();
 
@@ -476,57 +641,109 @@ pub fn build_search_entries(query: &str, cwd: &Path) -> Result<Vec<SearchEntry>>
     Ok(entries)
 }
 
-/// Stream search results to stdout. In blame-sort mode, results are emitted
-/// incrementally — one file at a time, in order of file last-touched — so the
-/// user sees the list update as `git blame` completes for each file. Within a
-/// file, occurrences are sorted by their individual line blame-date (most
-/// recent first). In normal mode, results are computed and printed all at once.
-pub fn run_search_streaming(query: &str, cwd: &Path) -> Result<()> {
-    use std::io::Write;
+/// Build the same entries as `build_search_entries` but globally sorted by
+/// per-line `git blame` timestamp. Order (youngest first vs oldest first) is
+/// taken from the active config. Used by the TUI when a blame sort is on.
+///
+/// Blame lookups go through `blame_times_cached`, which is itself
+/// cache-then-miss-and-warm — so calling this repeatedly during a session
+/// reuses any blame data warmed on a previous invocation. Switching
+/// young↔old never re-runs `git blame`; only the in-memory sort flips.
+pub fn build_blame_sorted_entries(
+    query: &str,
+    cwd: &Path,
+    settings: &YoinkSettings,
+) -> Result<Vec<SearchEntry>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let effective = effective_pattern(query, settings.search_mode, settings.case_sensitive)?;
+    let highlight_re = if effective.is_empty() {
+        None
+    } else {
+        Regex::new(&effective).ok()
+    };
 
-    // Empty query is the startup state — fzf's `start:reload` bind invokes
-    // __search with no query before the user has typed anything. The previous
-    // behavior walked the entire tree and emitted every file as a row (460k+
-    // rows / ~3s on a big multi-repo). fzf then had to ingest and render all
-    // of those rows before it could fire the first preview, which is why
-    // launching yoink "stalled" with a loading indicator for several seconds.
-    //
-    // yoink is a regex-search tool, not a file browser — the empty-query list
-    // is never actually useful. Returning early here means the prompt opens
-    // instantly and the first real reload (triggered by the user's first
-    // keystroke) is the one that does work.
+    let grouped = collect_rg_grouped(&effective, cwd, settings)?;
+    let files_in_order: Vec<PathBuf> = grouped.iter().map(|(p, _)| p.clone()).collect();
+    let mut by_file: HashMap<PathBuf, Vec<Occurrence>> = grouped.into_iter().collect();
+    let total_matches: usize = by_file.values().map(|v| v.len()).sum();
+
+    let mut all: Vec<(PathBuf, Occurrence, i64)> = Vec::with_capacity(total_matches);
+    for path in &files_in_order {
+        let times = blame_times_cached(cwd, path);
+        if let Some(occs) = by_file.remove(path) {
+            for occ in occs {
+                let ts = times.get(&occ.line).copied().unwrap_or(i64::MIN);
+                all.push((path.clone(), occ, ts));
+            }
+        }
+    }
+
+    let order = BlameOrder::from_sort(settings.sort);
+    all.sort_by(|a, b| {
+        let primary = match order {
+            BlameOrder::Youngest => b.2.cmp(&a.2),
+            BlameOrder::Oldest => a.2.cmp(&b.2),
+        };
+        primary
+            .then_with(|| a.0.to_string_lossy().cmp(&b.0.to_string_lossy()))
+            .then(a.1.line.cmp(&b.1.line))
+    });
+
+    let mut entries = Vec::with_capacity(all.len());
+    for (path, occurrence, ts) in all {
+        let date = if ts != i64::MIN {
+            format_unix_date(ts)
+        } else {
+            "----------".to_string()
+        };
+        let snippet = highlight_query_matches(&occurrence.snippet, highlight_re.as_ref());
+        let display = format!(
+            "\x1b[1;33m{}\x1b[0m  \x1b[36m{}\x1b[0m:\x1b[35m{}\x1b[0m  {}",
+            date,
+            path.to_string_lossy(),
+            occurrence.line,
+            truncate_snippet(&snippet, 140),
+        );
+        entries.push(SearchEntry {
+            display,
+            path: path.clone(),
+            line: Some(occurrence.line),
+        });
+    }
+    Ok(entries)
+}
+
+/// Stream search results to stdout. In blame-sort mode, the global list is
+/// sorted by per-line blame timestamp (youngest or oldest first depending on
+/// the configured `sort`).
+pub fn run_search_streaming(query: &str, cwd: &Path) -> Result<()> {
     if query.trim().is_empty() {
         return Ok(());
     }
 
-    if !blame_sort_active() {
-        let entries = build_search_entries(query, cwd)?;
+    let settings = load_settings()?;
+
+    if !blame_sort_active(&settings) {
+        let entries = build_search_entries(query, cwd, &settings)?;
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         out.write_all(format_search_entries(&entries).as_bytes())?;
         return Ok(());
     }
 
-    let settings = load_settings()?;
-    let highlight_re = Regex::new(query).ok();
+    let effective = effective_pattern(query, settings.search_mode, settings.case_sensitive)?;
+    let highlight_re = Regex::new(&effective).ok();
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    // Strategy: collect every match grouped by file (cheap), then look up
-    // cached blame data for each file, then sort globally by per-line blame
-    // timestamp and emit the result as ONE final list. Progress feedback for
-    // the slow blame-collection step is shown in the terminal by the separate
-    // `__blame_collect` subcommand (driven by the Ctrl-B fzf bind), not here.
-    let grouped = collect_rg_grouped(query, cwd, &settings)?;
+    let grouped = collect_rg_grouped(&effective, cwd, &settings)?;
     let files_in_order: Vec<PathBuf> = grouped.iter().map(|(p, _)| p.clone()).collect();
-    let mut by_file: HashMap<PathBuf, Vec<Occurrence>> =
-        grouped.into_iter().collect();
+    let mut by_file: HashMap<PathBuf, Vec<Occurrence>> = grouped.into_iter().collect();
     let total_matches: usize = by_file.values().map(|v| v.len()).sum();
 
-    // Quick "no git repo at all" diagnostic so the user doesn't see a list
-    // full of '----------' dates with no explanation. Only check the first
-    // file — same answer for every match under this tree.
     if let Some(first) = files_in_order.first() {
         let abs = cwd.join(first);
         if abs.parent().and_then(find_repo_root).is_none() {
@@ -540,10 +757,6 @@ pub fn run_search_streaming(query: &str, cwd: &Path) -> Result<()> {
         }
     }
 
-    // Build the result vector. Blame data should already be cached by the
-    // `__blame_collect` pass that runs when Ctrl-B is pressed; any cache
-    // miss here (rare — only for files matched by a *new* query the user
-    // typed since toggling on) will run blame inline.
     let mut all: Vec<(PathBuf, Occurrence, i64)> = Vec::with_capacity(total_matches);
     for path in &files_in_order {
         let times = blame_times_cached(cwd, path);
@@ -555,10 +768,13 @@ pub fn run_search_streaming(query: &str, cwd: &Path) -> Result<()> {
         }
     }
 
-    // Global sort: most-recently-blamed line first, ties broken by path then
-    // line number for deterministic output.
+    let order = BlameOrder::from_sort(settings.sort);
     all.sort_by(|a, b| {
-        b.2.cmp(&a.2)
+        let primary = match order {
+            BlameOrder::Youngest => b.2.cmp(&a.2),
+            BlameOrder::Oldest => a.2.cmp(&b.2),
+        };
+        primary
             .then_with(|| a.0.to_string_lossy().cmp(&b.0.to_string_lossy()))
             .then(a.1.line.cmp(&b.1.line))
     });
@@ -590,134 +806,24 @@ pub fn run_search_streaming(query: &str, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Render a unicode progress bar of `width` columns with `done`/`total` filled.
-fn progress_bar(done: usize, total: usize, width: usize) -> String {
-    if total == 0 {
-        return "─".repeat(width);
-    }
-    let filled = (done * width) / total;
-    let mut bar = String::with_capacity(width * 3 + 2);
-    bar.push('[');
-    for i in 0..width {
-        if i < filled {
-            bar.push('█');
-        } else {
-            bar.push('░');
-        }
-    }
-    bar.push(']');
-    bar
+/// Public façade around the internal grouped-occurrence collector, used by
+/// the TUI's blame warm-up worker thread. The returned vector contains one
+/// entry per file with matches; the `Occurrence` interior is intentionally
+/// opaque to callers (they only need the path list to drive the cache walk).
+pub fn collect_rg_grouped_public(
+    pattern: &str,
+    cwd: &Path,
+    settings: &YoinkSettings,
+) -> Result<Vec<(PathBuf, usize)>> {
+    let grouped = collect_rg_grouped(pattern, cwd, settings)?;
+    Ok(grouped
+        .into_iter()
+        .map(|(p, occs)| (p, occs.len()))
+        .collect())
 }
 
-/// Triggered by Ctrl-B (via fzf's `execute` action, which hands the terminal
-/// over to us for the duration of the call). Runs rg → groups by file →
-/// blames each file (writing to the per-session cache) while drawing a
-/// single-line, self-overwriting progress bar to the terminal. When this
-/// returns, fzf redraws and the subsequent `reload` runs `__search` against
-/// the now-warm cache, so the user sees a single fully-sorted list with no
-/// progress noise.
-pub fn run_blame_collect(query: &str, cwd: &Path) -> Result<()> {
-    // Only do anything when we are actually entering blame mode. The Ctrl-B
-    // bind toggles state *before* invoking us, so blame_sort_active() returns
-    // true iff the new state is blame mode.
-    if !blame_sort_active() {
-        return Ok(());
-    }
-
-    // Start with a fresh cache so toggling blame on always reflects the
-    // current state of the working tree. (Subsequent reloads from typing
-    // re-use this cache for the rest of the session.)
-    crate::blame::clear_blame_cache();
-
-    let stderr = std::io::stderr();
-    let mut term = stderr.lock();
-
-    // Clear screen, home cursor, hide cursor.
-    write!(term, "\x1b[2J\x1b[H\x1b[?25l")?;
-    writeln!(
-        term,
-        "\x1b[1;36m🔍 yoink — preparing blame-sorted view\x1b[0m"
-    )?;
-    if !query.trim().is_empty() {
-        writeln!(term, "  query: \x1b[1m{query}\x1b[0m")?;
-    }
-    writeln!(term)?;
-    term.flush()?;
-
-    if query.trim().is_empty() {
-        write!(term, "\x1b[?25h")?;
-        term.flush()?;
-        return Ok(());
-    }
-
-    let settings = load_settings()?;
-    let by_file = match collect_rg_grouped(query, cwd, &settings) {
-        Ok(v) => v,
-        Err(e) => {
-            writeln!(term, "\x1b[1;31m✗ rg failed: {e}\x1b[0m")?;
-            write!(term, "\x1b[?25h")?;
-            term.flush()?;
-            return Ok(());
-        }
-    };
-
-    let total = by_file.len();
-    let total_matches: usize = by_file.iter().map(|(_, v)| v.len()).sum();
-
-    if total == 0 {
-        writeln!(
-            term,
-            "\x1b[2;37mNo matches for this query — nothing to blame.\x1b[0m"
-        )?;
-        write!(term, "\x1b[?25h")?;
-        term.flush()?;
-        return Ok(());
-    }
-
-    writeln!(
-        term,
-        "  \x1b[1;33m{total_matches}\x1b[0m matches across \x1b[1;33m{total}\x1b[0m files"
-    )?;
-    writeln!(term)?;
-    term.flush()?;
-
-    let start = std::time::Instant::now();
-    let bar_width = 36;
-    for (idx, (path, _occs)) in by_file.iter().enumerate() {
-        let _ = blame_times_cached(cwd, path);
-        let done = idx + 1;
-        let bar = progress_bar(done, total, bar_width);
-        let pct = (done * 100) / total;
-        let label = path.to_string_lossy();
-        let truncated: String = label.chars().take(60).collect();
-        // \r returns to start of line; \x1b[K clears to end of line so a
-        // shorter path doesn't leave trailing characters from a previous
-        // longer one. The whole status fits on one updating line.
-        write!(
-            term,
-            "\r  \x1b[1;33m⏳\x1b[0m {bar} \x1b[1;36m{pct:>3}%\x1b[0m  \x1b[2;37m{done}/{total}\x1b[0m  \x1b[2;37m{truncated}\x1b[0m\x1b[K"
-        )?;
-        term.flush()?;
-    }
-
-    let elapsed = start.elapsed();
-    writeln!(term)?;
-    writeln!(
-        term,
-        "  \x1b[1;32m✓\x1b[0m blamed \x1b[1;33m{total}\x1b[0m files in \x1b[1;33m{:.1}s\x1b[0m — sorting…",
-        elapsed.as_secs_f64()
-    )?;
-    // Show cursor again before yielding the terminal back to fzf.
-    write!(term, "\x1b[?25h")?;
-    term.flush()?;
-
-    Ok(())
-}
-
-/// Run rg with the given query/settings and collect all matches grouped by
-/// file. Used by both `__search` blame mode and `__blame_collect`.
 fn collect_rg_grouped(
-    query: &str,
+    pattern: &str,
     cwd: &Path,
     settings: &YoinkSettings,
 ) -> Result<Vec<(PathBuf, Vec<Occurrence>)>> {
@@ -729,19 +835,9 @@ fn collect_rg_grouped(
         .arg("--color=never")
         .arg("--no-messages")
         .arg("-e")
-        .arg(query);
-    if settings.include_hidden {
-        rg_cmd.arg("--hidden");
-    }
-    if !settings.include_mounts {
-        rg_cmd.arg("--one-file-system");
-    }
-    if settings.include_symlinks {
-        rg_cmd.arg("--follow");
-    }
-    for pattern in &settings.globs {
-        rg_cmd.arg("-g").arg(format!("!{pattern}"));
-    }
+        .arg(pattern);
+    apply_rg_common_args(&mut rg_cmd, settings);
+
     let mut child = rg_cmd
         .arg(".")
         .current_dir(cwd)
@@ -852,9 +948,16 @@ fn highlight_query_matches(text: &str, re: Option<&Regex>) -> String {
     out
 }
 
-fn sort_candidates(candidates: &mut [Candidate], sort_mode: SortMode) {
-    match sort_mode {
-        SortMode::Depth => {
+fn sort_candidates(candidates: &mut [Candidate], sort: Sort) {
+    match sort {
+        Sort::Alphabetical => {
+            candidates.sort_by_key(|candidate| candidate.path.to_string_lossy().to_string());
+        }
+        // Depth — and the blame variants too, which never reach this
+        // function from the regular search path (the TUI dispatches them to
+        // `build_blame_sorted_entries`). Treat them as Depth here so we
+        // remain coherent if reached.
+        _ => {
             candidates.sort_by_key(|candidate| {
                 (
                     path_depth(&candidate.path),
@@ -862,14 +965,11 @@ fn sort_candidates(candidates: &mut [Candidate], sort_mode: SortMode) {
                 )
             });
         }
-        SortMode::Alphabetical => {
-            candidates.sort_by_key(|candidate| candidate.path.to_string_lossy().to_string());
-        }
     }
 }
 
 fn collect_occurrences(
-    query: &str,
+    pattern: &str,
     cwd: &Path,
     settings: &YoinkSettings,
 ) -> Result<HashMap<PathBuf, Vec<Occurrence>>> {
@@ -881,23 +981,8 @@ fn collect_occurrences(
         .arg("--color=never")
         .arg("--no-messages")
         .arg("-e")
-        .arg(query);
-
-    if settings.include_hidden {
-        rg_command.arg("--hidden");
-    }
-
-    if !settings.include_mounts {
-        rg_command.arg("--one-file-system");
-    }
-
-    if settings.include_symlinks {
-        rg_command.arg("--follow");
-    }
-
-    for pattern in &settings.globs {
-        rg_command.arg("-g").arg(format!("!{pattern}"));
-    }
+        .arg(pattern);
+    apply_rg_common_args(&mut rg_command, settings);
 
     let output = rg_command
         .arg(".")

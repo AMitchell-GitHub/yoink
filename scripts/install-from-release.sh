@@ -89,20 +89,11 @@ ok "Installed yoink to ${install_dir}/yoink"
 # ---------------------------------------------------------------------------
 # 2. Default config
 # ---------------------------------------------------------------------------
-config_path="${HOME}/.yoinkignore"
-if [[ ! -f "$config_path" ]]; then
-  cat > "$config_path" <<'CONF'
-include_hidden=false
-include_mounts=false
-include_symlinks=false
-sort_mode=depth
-
-.git/**
-node_modules/**
-CONF
-  ok "Installed default config at ${config_path}"
-else
+config_path="${HOME}/.yoink-config"
+if [[ -f "$config_path" ]]; then
   info "Keeping existing config at ${config_path}"
+else
+  info "yoink will write the annotated default config to ${config_path} on first launch."
 fi
 
 # ---------------------------------------------------------------------------
@@ -116,7 +107,7 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$install_dir"; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Dependency checks  (rg, fzf, bat)
+# 4. Dependency checks  (rg, bat)
 # ---------------------------------------------------------------------------
 echo
 info "Checking dependencies..."
@@ -151,7 +142,6 @@ pkg_name_for() {
         pacman) echo "ripgrep" ;;
         *)      echo "ripgrep" ;;
       esac ;;
-    fzf) echo "fzf" ;;
     bat) echo "bat" ;;
   esac
 }
@@ -160,7 +150,7 @@ missing_tools=()
 missing_pkgs=()
 batcat_handled=false
 
-for tool in rg fzf bat; do
+for tool in rg bat; do
   if command -v "$tool" >/dev/null 2>&1; then
     ok "${tool} found"
   else
@@ -187,7 +177,6 @@ for tool in rg fzf bat; do
       err "${tool} is NOT installed  (required by yoink)"
       case "$tool" in
         rg)  echo "    ripgrep - a fast regex search tool" ;;
-        fzf) echo "    fzf    - a fuzzy finder for the terminal" ;;
         bat) echo "    bat    - a syntax-highlighted file viewer" ;;
       esac
     fi
@@ -238,7 +227,6 @@ if [[ ${#missing_tools[@]} -gt 0 ]]; then
     for tool in "${missing_tools[@]}"; do
       case "$tool" in
         rg)  echo "    ripgrep  https://github.com/BurntSushi/ripgrep#installation" ;;
-        fzf) echo "    fzf      https://github.com/junegunn/fzf#installation" ;;
         bat) echo "    bat      https://github.com/sharkdp/bat#installation" ;;
       esac
     done

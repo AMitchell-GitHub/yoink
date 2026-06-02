@@ -1,7 +1,11 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "yoink", version, about = "TUI regex search using rg + fzf + bat")]
+#[command(
+    name = "yoink",
+    version,
+    about = "Native TUI search — glob or regex, git blame sort, configurable open-bindings"
+)]
 pub struct Cli {
     #[arg(value_name = "SEARCH")]
     pub query: Option<String>,
@@ -12,33 +16,20 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum InternalCommand {
+    /// Run a one-shot search and print results to stdout. Useful for
+    /// scripting and as a diagnostic aid; the interactive TUI doesn't use
+    /// it.
     #[command(name = "__search", hide = true)]
     Search {
         #[arg(default_value = "")]
         query: String,
     },
-    #[command(name = "__preview", hide = true)]
-    Preview {
-        path: String,
-        #[arg(default_value = "")]
-        query: String,
-        line: Option<usize>,
-    },
-    #[command(name = "__toggle_blame", hide = true)]
-    ToggleBlame,
-    #[command(name = "__prompt", hide = true)]
-    Prompt,
-    /// Run only when the user toggles INTO blame mode. Takes over the
-    /// terminal for the duration of the call to draw an in-place progress
-    /// bar, then exits so fzf can redraw and reload from the warm cache.
-    #[command(name = "__blame_collect", hide = true)]
-    BlameCollect {
-        #[arg(default_value = "")]
-        query: String,
-    },
+    /// Copy a path or filename to the clipboard. Used by integration tests
+    /// to exercise the clipboard-tool detection logic in a subprocess (so
+    /// each test gets its own env). Also handy for shell scripts.
     #[command(name = "__copy", hide = true)]
     Copy {
-        /// "relative" or "filename"
+        /// "relative" (path:line) or "filename" (basename only)
         mode: String,
         path: String,
         #[arg(default_value = "")]

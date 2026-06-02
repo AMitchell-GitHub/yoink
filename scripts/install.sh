@@ -48,14 +48,12 @@ ok "yoink installed via cargo"
 # ---------------------------------------------------------------------------
 # 2. Default config
 # ---------------------------------------------------------------------------
-config_path="$HOME/.yoinkignore"
-default_config="$workspace_root/.yoinkignore"
+config_path="$HOME/.yoink-config"
 
-if [[ ! -f "$config_path" ]]; then
-  cp "$default_config" "$config_path"
-  ok "Installed default config at $config_path"
-else
+if [[ -f "$config_path" ]]; then
   info "Keeping existing config at $config_path"
+else
+  info "yoink will write the annotated default config to $config_path on first launch."
 fi
 
 # ---------------------------------------------------------------------------
@@ -70,7 +68,7 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$cargo_bin"; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Dependency checks  (rg, fzf, bat)
+# 4. Dependency checks  (rg, bat)
 # ---------------------------------------------------------------------------
 echo
 info "Checking dependencies..."
@@ -100,7 +98,6 @@ pkg_name_for() {
   local tool="$1"
   case "$tool" in
     rg)  echo "ripgrep" ;;
-    fzf) echo "fzf" ;;
     bat) echo "bat" ;;
   esac
 }
@@ -108,7 +105,7 @@ pkg_name_for() {
 missing_tools=()
 missing_pkgs=()
 
-for tool in rg fzf bat; do
+for tool in rg bat; do
   if command -v "$tool" >/dev/null 2>&1; then
     ok "${tool} found"
   else
@@ -134,7 +131,6 @@ for tool in rg fzf bat; do
       err "${tool} is NOT installed  (required by yoink)"
       case "$tool" in
         rg)  echo "    ripgrep - a fast regex search tool" ;;
-        fzf) echo "    fzf    - a fuzzy finder for the terminal" ;;
         bat) echo "    bat    - a syntax-highlighted file viewer" ;;
       esac
     fi
@@ -185,7 +181,6 @@ if [[ ${#missing_tools[@]} -gt 0 ]]; then
     for tool in "${missing_tools[@]}"; do
       case "$tool" in
         rg)  echo "    ripgrep  https://github.com/BurntSushi/ripgrep#installation" ;;
-        fzf) echo "    fzf      https://github.com/junegunn/fzf#installation" ;;
         bat) echo "    bat      https://github.com/sharkdp/bat#installation" ;;
       esac
     done

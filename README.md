@@ -2,13 +2,12 @@
 
 # yoink ![GitHub all releases](https://img.shields.io/github/downloads/AMItchell-GitHub/yoink/total)
 
-`yoink` is an interactive terminal search tool powered by `ripgrep`, `fzf`, and `bat`.
+`yoink` is a native terminal search TUI powered by `ripgrep` (matching) and
+`bat` (preview). It searches file/folder names and file contents together,
+with a live preview, git blame sorting, and configurable open-actions.
 
-It searches both:
-- file/folder names (regex)
-- text inside files (regex)
-
-Results are shown on the left, with a live preview on the right.
+The UI is its own ratatui app — no `fzf` dependency. Status, mode, and binds
+are always visible; common settings flip with one keypress (no menu to open).
 
 ## Install (recommended)
 
@@ -18,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/AMitchell-GitHub/yoink/refs/heads/m
 
 This installs:
 - `yoink` to `~/.local/bin/yoink`
-- default config to `~/.yoinkignore` (if it does not already exist)
+- On first launch, yoink writes the fully-annotated default config to `~/.yoink-config`. Edit it freely; yoink reloads as soon as you save.
 
 If `yoink` is not found after install, add this to your shell config:
 
@@ -29,13 +28,14 @@ export PATH="$HOME/.local/bin:$PATH"
 ## Requirements
 
 - `rg` (ripgrep)
-- `fzf`
 - `bat`
 
-Optional editor commands for keybinds:
-- `vim`
+Optional commands referenced by the default open-action keybindings:
+- `vim` / `vi` / `nano` / `cat`
 - `code` (VS Code)
 - `subl` (Sublime Text)
+- `xdg-open` (system file explorer / default app)
+- `xclip` or `wl-copy` for clipboard binds
 
 ## Usage
 
@@ -44,20 +44,67 @@ yoink
 yoink ejectReasons
 ```
 
-Here are a few other regex examples to help you along:
+Type your query, then **press Enter** to run the search. The default mode is
+**case-insensitive glob** — a noob-friendly wrapper that translates to regex
+under the hood, so you don't need to know regex to use yoink. Press **F2** to
+switch to regex mode, toggle case sensitivity, or change sort order.
+
+### Glob examples (default mode)
 ```
-[Ss]earch                     --> any char in []; matches: "search", "Search"
-(?i)search                    --> case-ignore; matches: "SeArCh", "search", "SEARCH"
-term1.*term2                  --> multi-term; matches: "asdfb_term1+gfdskrjhfgrd.term2=fasdfe"
-(term1|term2).*(term1|term2)  --> disordered multi-term
+foo            → matches "foo" anywhere in name or content
+*.rs           → matches the ".rs" suffix
+src/*test*     → matches paths like src/foo_test.rs
+foo?bar        → matches "fooXbar" for any single X
+```
+Regex metacharacters in a glob query (`.+(){}` etc.) are escaped automatically,
+so a glob user can paste a filename with dots and it just works.
+
+### Regex examples (switch via F2)
+```
+[Ss]earch                     → any char in []; matches: "search", "Search"
+(?i)search                    → case-ignore inline (or just toggle Case in F2)
+term1.*term2                  → multi-term; matches: "...term1...term2..."
+(term1|term2).*(term1|term2)  → disordered multi-term
 ```
 
 ## Keybinds
 
-- `Enter`: print the containing directory of selected result
-- `Ctrl-V`: open in `vim`
-- `Ctrl-O`: open in `code`
-- `Ctrl-S`: open in `subl`
+Always available, no menu required:
+
+- **Enter** — run the search for the current query (does **not** open / cd)
+- **↑ / ↓ / PgUp / PgDn / Home / End** — move the selection in the results pane
+- **F3** — open the search-mode picker (glob / regex), cursor on the current value
+- **F4** — open the case-sensitivity picker (insensitive / sensitive)
+- **F5** — open the sort picker (depth / alphabetical / youngest blame / oldest blame)
+
+  These three pickers are **session-only** — the choice applies until you quit and is never written to the config. To change the default for new sessions, use **F2 → edit the values → Save**.
+- **F1** — show the full bindings list overlay (`?` is left free so it can be typed into the query — it's a glob wildcard and part of regex flags like `(?i)`)
+- **F2** — settings overlay: edit the per-session defaults (search mode / sensitivity / sorting) with ←/→ and **Save** them, edit the config file, or view the shipped reference. Save writes the defaults for *new* sessions and leaves the current one alone.
+- **Esc** — close any overlay
+- **Ctrl-C** — quit
+
+Everything else is opt-in via `bind.<key> = <action>` in `~/.yoink-config` — a key does nothing unless you bind it (there are no default `Ctrl-*` chords). Two kinds of actions: ones that act on the highlighted result, and ones that edit the query box. The shipped config wires up these:
+
+- `Ctrl-D` — `cd` (into folder if highlighted, else to its parent; exits yoink)
+- `Ctrl-U` — `clear_query` (clear the whole query)
+- `Ctrl-O` — open in `code` (VS Code)
+- `Ctrl-S` — open in `subl` (Sublime Text)
+- `Ctrl-X` — open in system file explorer (`xdg-open`)
+- `Ctrl-V` — open in `vim`
+- `Ctrl-N` — open in `nano`
+- `Ctrl-Y` — copy file path to clipboard
+- `Ctrl-F` — copy file name to clipboard
+
+Result-action vocabulary: `cd`, `vim`, `vi`, `nano`, `cat`, `vscode`, `sublime`,
+`explorer`, `copy_path`, `copy_name`. Terminal editors (vim/vi/nano/cat) return
+to the results list after you quit them; GUI editors / explorer / copies keep
+the session open; `cd` exits and changes the shell's directory.
+
+Query-editing vocabulary: `clear_query`, `delete_word`, `line_start`, `line_end`.
+Bind these to whatever keys you like (e.g. `bind.ctrl-w = delete_word`); they're
+unbound unless you add a line. If a key is claimed by more than one bind (or by
+a built-in), the built-in — or else the first matching bind line — wins and the
+rest do nothing; yoink lists every such collision in a startup warning.
 
 Results list UX:
 - Single mono-list: file/folder rows and text-match rows together
@@ -79,25 +126,24 @@ yoink() {
 }
 ```
 
-## Config (`~/.yoinkignore`)
+## Config (`~/.yoink-config`)
 
-`yoink` uses one system-wide config file at `~/.yoinkignore`.
+`yoink` uses one system-wide config file at `~/.yoink-config`. On first
+launch, yoink materializes a fully-annotated default file there so the
+schema is self-documenting — every key has comments explaining its values
+right next to it. Read the file once and you'll know everything.
 
-Default:
+Reopen the file from inside yoink with **F2 → "Edit config file"**, or
+browse the shipped reference (read-only) with **F2 → "Show default config
+(reference)"** if you've made your file messy and want to see the original.
 
-```text
-include_hidden=false
-include_mounts=false
-include_symlinks=false
-sort_mode=depth
+Sections in order:
 
-.git/**
-node_modules/**
-```
+- **defaults** — `search_mode` (glob | regex), `case_sensitive` (true | false), `sort` (depth | alphabetical | blame_young | blame_old). These are the *new-session* defaults; **F2 → Save** writes them. The inline **F3 / F4 / F5** pickers override them for the current session only and never touch the file.
+- **walking** — `include_hidden`, `include_mounts`, `include_symlinks` (all `false` by default).
+- **ignored paths** — glob patterns, one per line. Default: `.git/**`, `node_modules/**`.
+- **keybinds** — `bind.<key> = <action>`. **Config-only**: a key has no behavior unless it's listed here, and that includes every `Ctrl-*` chord (no built-in defaults). Result actions: `cd`, `vim`, `vi`, `nano`, `cat`, `vscode`, `sublime`, `explorer`, `copy_path`, `copy_name`. Query-editing actions: `clear_query`, `delete_word`, `line_start`, `line_end`. If a key collides across binds (or with a built-in), the built-in — or else the first matching bind line — wins and the rest do nothing; yoink lists **every** such conflict in a startup warning.
 
-Behavior:
-- `include_hidden`: include dotfiles and dot-directories
-- `include_mounts`: search across mounted filesystems
-- `include_symlinks`: follow symlinks
-- `sort_mode`: `depth` or `alphabetical`
-- Any other non-comment line is treated as an ignore glob
+Built-in keys (↑/↓/PgUp/PgDn/Esc/F1/F2/F3/F4/F5/Ctrl-C) are always available and can't be rebound. `Enter` is reserved — it always runs the search. `?` is deliberately *not* a built-in key so it can be typed into the query (glob wildcard / regex `(?i)` flags).
+
+The easiest way to change the persisted defaults is **F2 → Settings** inside the tool; the inline **F3 / F4 / F5** pickers change only the current session.
