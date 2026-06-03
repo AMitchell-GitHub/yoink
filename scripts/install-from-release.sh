@@ -97,13 +97,52 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Detect the user's shell config file (used by the PATH and helper sections)
+# ---------------------------------------------------------------------------
+rc_file=""
+shell_name=""
+
+if [[ -n "${SHELL:-}" ]]; then
+  case "$SHELL" in
+    */zsh)  shell_name="zsh";  rc_file="${HOME}/.zshrc"  ;;
+    */bash) shell_name="bash"; rc_file="${HOME}/.bashrc" ;;
+  esac
+fi
+
+# Fallback: check which files exist
+if [[ -z "$rc_file" ]]; then
+  if [[ -f "${HOME}/.zshrc" ]]; then
+    shell_name="zsh";  rc_file="${HOME}/.zshrc"
+  elif [[ -f "${HOME}/.bashrc" ]]; then
+    shell_name="bash"; rc_file="${HOME}/.bashrc"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 3. PATH check
 # ---------------------------------------------------------------------------
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$install_dir"; then
   echo
   warn "${install_dir} is not in your PATH."
-  echo "  You may need to add this line to your shell config:"
-  printf "    ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}\n"
+  path_line='export PATH="$HOME/.local/bin:$PATH"'
+  if [[ -n "$rc_file" ]] && grep -qF "$path_line" "$rc_file" 2>/dev/null; then
+    info "${rc_file} already adds it to your PATH."
+    echo "  Restart your shell (or run 'source ${rc_file}') to pick it up."
+  elif [[ -n "$rc_file" ]]; then
+    if ask_yes_no "  Add it to ${rc_file}?"; then
+      printf '\n# Added by yoink installer: put ~/.local/bin on PATH\n%s\n' "$path_line" >> "$rc_file"
+      ok "Added PATH update to ${rc_file}"
+      echo
+      warn "To use it in this terminal, run:"
+      printf "    ${BOLD}source ${rc_file}${NC}\n"
+    else
+      echo "  You can add this line to your shell config manually:"
+      printf "    ${BOLD}%s${NC}\n" "$path_line"
+    fi
+  else
+    echo "  You may need to add this line to your shell config:"
+    printf "    ${BOLD}%s${NC}\n" "$path_line"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -238,51 +277,31 @@ fi
 # 5. Shell helper function  (lets yoink cd into directories)
 # ---------------------------------------------------------------------------
 echo
-info "Optional: shell helper function"
-echo
-echo "  By default, running 'yoink' prints the path of the selected result."
-echo "  If you'd like yoink to automatically cd into the result's directory,"
-echo "  a small wrapper function is needed in your shell config."
-echo
-echo "  The function:"
-echo
-printf "    ${BOLD}yoink() {${NC}\n"
-printf "    ${BOLD}  local target${NC}\n"
-printf "    ${BOLD}  target=\"\$(command yoink \"\$@\")\" || return${NC}\n"
-printf "    ${BOLD}  [[ -n \"\$target\" ]] && cd \"\$target\"${NC}\n"
-printf "    ${BOLD}}${NC}\n"
-echo
-echo "  It runs the real yoink binary, captures the path it outputs,"
-echo "  then cd's your shell into that directory. Without this, yoink"
-echo "  can only print the path (a subprocess cannot change the parent"
-echo "  shell's working directory)."
-echo
+if [[ -n "$rc_file" ]] && grep -q 'command yoink' "$rc_file" 2>/dev/null; then
+  # Already present — no need to re-explain or re-prompt.
+  ok "yoink() shell function already exists in ${rc_file}"
+else
+  info "Optional: shell helper function"
+  echo
+  echo "  By default, running 'yoink' prints the path of the selected result."
+  echo "  If you'd like yoink to automatically cd into the result's directory,"
+  echo "  a small wrapper function is needed in your shell config."
+  echo
+  echo "  The function:"
+  echo
+  printf "    ${BOLD}yoink() {${NC}\n"
+  printf "    ${BOLD}  local target${NC}\n"
+  printf "    ${BOLD}  target=\"\$(command yoink \"\$@\")\" || return${NC}\n"
+  printf "    ${BOLD}  [[ -n \"\$target\" ]] && cd \"\$target\"${NC}\n"
+  printf "    ${BOLD}}${NC}\n"
+  echo
+  echo "  It runs the real yoink binary, captures the path it outputs,"
+  echo "  then cd's your shell into that directory. Without this, yoink"
+  echo "  can only print the path (a subprocess cannot change the parent"
+  echo "  shell's working directory)."
+  echo
 
-# Detect the user's shell config file
-rc_file=""
-shell_name=""
-
-if [[ -n "${SHELL:-}" ]]; then
-  case "$SHELL" in
-    */zsh)  shell_name="zsh";  rc_file="${HOME}/.zshrc"  ;;
-    */bash) shell_name="bash"; rc_file="${HOME}/.bashrc" ;;
-  esac
-fi
-
-# Fallback: check which files exist
-if [[ -z "$rc_file" ]]; then
-  if [[ -f "${HOME}/.zshrc" ]]; then
-    shell_name="zsh";  rc_file="${HOME}/.zshrc"
-  elif [[ -f "${HOME}/.bashrc" ]]; then
-    shell_name="bash"; rc_file="${HOME}/.bashrc"
-  fi
-fi
-
-if [[ -n "$rc_file" ]]; then
-  # Check if the function is already present
-  if grep -q 'command yoink' "$rc_file" 2>/dev/null; then
-    ok "yoink() shell function already exists in ${rc_file}"
-  else
+  if [[ -n "$rc_file" ]]; then
     if ask_yes_no "  Add the yoink() function to ${rc_file}?"; then
       cat >> "$rc_file" <<'FUNC'
 
@@ -302,10 +321,10 @@ FUNC
     else
       info "Skipped. You can always add it manually later."
     fi
+  else
+    warn "Could not detect your shell config file."
+    echo "  Add the yoink() function shown above to your ~/.bashrc or ~/.zshrc manually."
   fi
-else
-  warn "Could not detect your shell config file."
-  echo "  Add the yoink() function shown above to your ~/.bashrc or ~/.zshrc manually."
 fi
 
 # ---------------------------------------------------------------------------
