@@ -347,6 +347,14 @@ build_proposed_rcfile() {
   fi
 }
 
+# Print $1 with the per-release version-stamp line neutralized, so a bump that
+# only changes "# Created by yoink vX" isn't treated as a change worth
+# prompting about. The rc file just keeps its old stamp until the function body
+# actually changes.
+yoink_strip_version() {
+  sed 's/^# Created by yoink v.*/# Created by yoink vSTAMP/' "$1" 2>/dev/null
+}
+
 echo
 if [[ -z "$rc_file" ]]; then
   warn "Could not detect your shell config file."
@@ -362,7 +370,9 @@ else
   yoink_base="$rc_file"
   [[ -f "$yoink_base" ]] || yoink_base=/dev/null
 
-  if diff -q "$yoink_base" "$yoink_proposed" >/dev/null 2>&1; then
+  # Compare with the version stamp neutralized: a version-only bump is not a
+  # reason to rewrite the user's profile.
+  if diff -q <(yoink_strip_version "$yoink_base") <(yoink_strip_version "$yoink_proposed") >/dev/null 2>&1; then
     ok "yoink() shell function is already up to date in ${rc_file}"
   else
     existing_ver="$(grep -m1 -oE 'Created by yoink v[0-9]+(\.[0-9]+)*' "$rc_file" 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1 || true)"
