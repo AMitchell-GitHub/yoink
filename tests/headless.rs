@@ -66,12 +66,26 @@ fn context_lines_surround_the_match() {
         &["needle", "-o", "json", "-C", "1"],
     );
     let body = stdout(&output);
-    assert!(
-        body.contains("\"context_before\": [\"l2\"]"),
-        "body: {body}"
-    );
-    assert!(body.contains("\"context_after\": [\"l4\"]"), "body: {body}");
+    // The single `context` array holds before + matched line + after, in order,
+    // and `context_start_line` anchors it to an absolute line number.
     assert!(body.contains("\"context_start_line\": 2"), "body: {body}");
+    assert!(body.contains("\"context\":"), "body: {body}");
+    assert!(
+        body.contains("\"l2\""),
+        "missing before-context; body: {body}"
+    );
+    assert!(
+        body.contains("\"l3 needle\""),
+        "matched line should be in context; body: {body}"
+    );
+    assert!(
+        body.contains("\"l4\""),
+        "missing after-context; body: {body}"
+    );
+    assert!(
+        !body.contains("context_before"),
+        "old split fields should be gone; body: {body}"
+    );
 }
 
 #[test]
@@ -89,8 +103,9 @@ fn jsonl_emits_one_object_per_line() {
     let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), 3, "expected 3 occurrences, got: {body}");
     for line in lines {
+        // JSONL objects are compact (no spaces after colons).
         assert!(line.starts_with('{') && line.ends_with('}'), "line: {line}");
-        assert!(line.contains("\"kind\": \"content\""), "line: {line}");
+        assert!(line.contains("\"kind\":\"content\""), "line: {line}");
     }
 }
 
@@ -134,8 +149,17 @@ fn markdown_output_has_heading_and_fenced_excerpt() {
     let body = stdout(&output);
     assert!(body.contains("# yoink results: `needle`"), "body: {body}");
     assert!(body.contains("## `a.txt:2:1`"), "body: {body}");
-    // The match line is marked with '>' inside a fenced block.
-    assert!(body.contains("> needle here"), "body: {body}");
+    // The fenced block carries a line-number gutter; the matched line (line 2)
+    // is marked with '>', context lines are plain.
+    assert!(body.contains("```"), "missing code fence; body: {body}");
+    assert!(
+        body.contains("2 > needle here"),
+        "matched line should be numbered and marked; body: {body}"
+    );
+    assert!(
+        body.contains("1   before"),
+        "context line should be numbered; body: {body}"
+    );
 }
 
 #[test]
@@ -191,12 +215,10 @@ fn path_name_matches_appear_as_path_kind() {
 
     let output = run(dir.path(), REGEX_CONFIG, &["needle", "-o", "jsonl"]);
     let body = stdout(&output);
+    // JSONL is compact (no spaces after colons).
     assert!(
-        body.contains("\"kind\": \"path\""),
+        body.contains("\"kind\":\"path\""),
         "expected a path-kind match; body: {body}"
     );
-    assert!(
-        body.contains("\"path\": \"needle_file.rs\""),
-        "body: {body}"
-    );
+    assert!(body.contains("\"path\":\"needle_file.rs\""), "body: {body}");
 }

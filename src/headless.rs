@@ -17,6 +17,7 @@ use crate::search::{
     collect_path_matches, collect_rg_grouped, effective_pattern, load_settings, SearchMode, Sort,
 };
 use anyhow::{bail, Result};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
@@ -52,11 +53,14 @@ impl Kind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct BlameInfo {
     date: String,
     timestamp: i64,
     author: String,
+    /// Empty for path-kind results (we use `git log -1`, which has no per-line
+    /// sha to attach), so it's omitted from JSON rather than shown blank.
+    #[serde(skip_serializing_if = "String::is_empty")]
     sha: String,
 }
 
@@ -313,6 +317,70 @@ fn case_token(case_sensitive: bool) -> &'static str {
     }
 }
 
+/// One result as serialized to JSON / JSONL. Holds borrows into the underlying
+/// `MatchRecord` so building it is allocation-free. Optional fields are omitted
+/// (rather than emitted as `null`) when absent — e.g. a path-kind result has no
+/// `line`, `match`, or `context`.
+#[derive(Serialize)]
+struct JsonResult<'a> {
+    kind: &'static str,
+    path: String,
+    is_dir: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    column: Option<usize>,
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    match_line: Option<&'a str>,
+    /// 1-indexed line number of the first `context` line, so a consumer can
+    /// reconstruct absolute line numbers without us repeating one per line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_start_line: Option<usize>,
+    /// The matched line together with the lines before and after it, in source
+    /// order — a single ready-to-read block.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    context: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blame: Option<&'a BlameInfo>,
+}
+
+impl<'a> JsonResult<'a> {
+    fn from_record(record: &'a MatchRecord) -> JsonResult<'a> {
+        let mut context: Vec<&str> = Vec::new();
+        context.extend(record.context_before.iter().map(String::as_str));
+        if let Some(match_line) = record.match_line.as_deref() {
+            context.push(match_line);
+        }
+        context.extend(record.context_after.iter().map(String::as_str));
+
+        JsonResult {
+            kind: record.kind.token(),
+            path: record.path_str(),
+            is_dir: record.is_dir,
+            line: record.line,
+            column: record.column,
+            match_line: record.match_line.as_deref(),
+            context_start_line: record.context_start_line,
+            context,
+            blame: record.blame.as_ref(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonEnvelope<'a> {
+    query: &'a str,
+    mode: &'static str,
+    sort: &'static str,
+    case: &'static str,
+    root: String,
+    context_lines: usize,
+    count: usize,
+    total_matches: usize,
+    truncated: bool,
+    results: Vec<JsonResult<'a>>,
+}
+
 fn render_json(
     opts: &HeadlessOptions,
     settings: &crate::search::YoinkSettings,
@@ -321,154 +389,35 @@ fn render_json(
     total: usize,
     truncated: bool,
 ) -> String {
-    let mut out = String::new();
-    out.push_str("{\n");
-    out.push_str(&format!("  \"query\": {},\n", json_string(&opts.query)));
-    out.push_str(&format!(
-        "  \"mode\": {},\n",
-        json_string(settings.search_mode.token())
-    ));
-    out.push_str(&format!(
-        "  \"sort\": {},\n",
-        json_string(settings.sort.token())
-    ));
-    out.push_str(&format!(
-        "  \"case\": {},\n",
-        json_string(case_token(settings.case_sensitive))
-    ));
-    out.push_str(&format!(
-        "  \"root\": {},\n",
-        json_string(&cwd.to_string_lossy())
-    ));
-    out.push_str(&format!("  \"context_lines\": {},\n", opts.context));
-    out.push_str(&format!("  \"count\": {},\n", records.len()));
-    out.push_str(&format!("  \"total_matches\": {},\n", total));
-    out.push_str(&format!("  \"truncated\": {},\n", truncated));
-    out.push_str("  \"results\": [");
-    if records.is_empty() {
-        out.push_str("]\n");
-    } else {
-        out.push('\n');
-        for (index, record) in records.iter().enumerate() {
-            out.push_str(&json_record(record, "    "));
-            if index + 1 < records.len() {
-                out.push(',');
-            }
-            out.push('\n');
-        }
-        out.push_str("  ]\n");
-    }
-    out.push_str("}\n");
+    let envelope = JsonEnvelope {
+        query: &opts.query,
+        mode: settings.search_mode.token(),
+        sort: settings.sort.token(),
+        case: case_token(settings.case_sensitive),
+        root: cwd.to_string_lossy().into_owned(),
+        context_lines: opts.context,
+        count: records.len(),
+        total_matches: total,
+        truncated,
+        results: records.iter().map(JsonResult::from_record).collect(),
+    };
+    // Pretty-printed so the output is human-readable and pastes into an editor
+    // as well-formed JSON. Serialization of these plain structs cannot fail;
+    // fall back to an empty object defensively.
+    let mut out = serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| "{}".to_string());
+    out.push('\n');
     out
 }
 
 fn render_jsonl(records: &[MatchRecord]) -> String {
     let mut out = String::new();
     for record in records {
-        out.push_str(&json_record(record, ""));
-        out.push('\n');
-    }
-    out
-}
-
-/// Serialize one record. `indent` is the leading whitespace for the opening
-/// brace's *contents*; the opening brace is emitted inline so this composes
-/// inside an array (JSON) or on a single line (JSONL, when `indent` is empty).
-fn json_record(record: &MatchRecord, indent: &str) -> String {
-    let multiline = !indent.is_empty();
-    let inner = if multiline {
-        format!("{indent}  ")
-    } else {
-        String::new()
-    };
-    let nl = if multiline { "\n" } else { "" };
-    let sep = if multiline {
-        format!(",\n{inner}")
-    } else {
-        ", ".to_string()
-    };
-
-    let mut fields: Vec<String> = Vec::new();
-    fields.push(format!("\"kind\": {}", json_string(record.kind.token())));
-    fields.push(format!("\"path\": {}", json_string(&record.path_str())));
-    fields.push(format!("\"is_dir\": {}", record.is_dir));
-    fields.push(format!("\"line\": {}", json_opt_usize(record.line)));
-    fields.push(format!("\"column\": {}", json_opt_usize(record.column)));
-    fields.push(format!(
-        "\"match\": {}",
-        match &record.match_line {
-            Some(line) => json_string(line),
-            None => "null".to_string(),
-        }
-    ));
-    fields.push(format!(
-        "\"context_before\": {}",
-        json_string_array(&record.context_before)
-    ));
-    fields.push(format!(
-        "\"context_after\": {}",
-        json_string_array(&record.context_after)
-    ));
-    fields.push(format!(
-        "\"context_start_line\": {}",
-        json_opt_usize(record.context_start_line)
-    ));
-    fields.push(format!("\"blame\": {}", json_blame(record.blame.as_ref())));
-
-    format!("{indent}{{{nl}{inner}{}{nl}{indent}}}", fields.join(&sep))
-}
-
-fn json_blame(blame: Option<&BlameInfo>) -> String {
-    match blame {
-        None => "null".to_string(),
-        Some(info) => format!(
-            "{{\"date\": {}, \"timestamp\": {}, \"author\": {}, \"sha\": {}}}",
-            json_string(&info.date),
-            info.timestamp,
-            json_string(&info.author),
-            json_string(&info.sha),
-        ),
-    }
-}
-
-fn json_string_array(items: &[String]) -> String {
-    let mut out = String::from("[");
-    for (index, item) in items.iter().enumerate() {
-        if index > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(&json_string(item));
-    }
-    out.push(']');
-    out
-}
-
-fn json_opt_usize(value: Option<usize>) -> String {
-    match value {
-        Some(v) => v.to_string(),
-        None => "null".to_string(),
-    }
-}
-
-/// JSON-encode a string, including the surrounding quotes. Handles the full
-/// set of mandatory escapes plus `\uXXXX` for control characters.
-fn json_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+        let result = JsonResult::from_record(record);
+        if let Ok(line) = serde_json::to_string(&result) {
+            out.push_str(&line);
+            out.push('\n');
         }
     }
-    out.push('"');
     out
 }
 
@@ -517,22 +466,37 @@ fn render_markdown(
                     ));
                 }
                 out.push('\n');
-                out.push_str(&format!("```{}\n", language_for(&record.path)));
+
+                // Excerpt = before + matched line + after. The fence is sized
+                // off the raw lines; the rendered block carries a line-number
+                // gutter with the matched line marked by `>`.
+                let mut excerpt: Vec<&str> = Vec::new();
+                excerpt.extend(record.context_before.iter().map(String::as_str));
+                if let Some(match_line) = &record.match_line {
+                    excerpt.push(match_line);
+                }
+                excerpt.extend(record.context_after.iter().map(String::as_str));
+
                 let start = record.context_start_line.unwrap_or(line);
+                let last = start + excerpt.len().saturating_sub(1);
+                let width = last.to_string().len().max(3);
+
+                let fence = code_fence_for(&excerpt);
+                out.push_str(&format!("{}{}\n", fence, language_for(&record.path)));
                 let mut current = start;
                 for ctx in &record.context_before {
-                    out.push_str(&format!("{:>5}   {}\n", current, ctx));
+                    out.push_str(&format!("{current:>width$}   {ctx}\n"));
                     current += 1;
                 }
                 if let Some(match_line) = &record.match_line {
-                    out.push_str(&format!("{:>5} > {}\n", current, match_line));
+                    out.push_str(&format!("{current:>width$} > {match_line}\n"));
                     current += 1;
                 }
                 for ctx in &record.context_after {
-                    out.push_str(&format!("{:>5}   {}\n", current, ctx));
+                    out.push_str(&format!("{current:>width$}   {ctx}\n"));
                     current += 1;
                 }
-                out.push_str("```\n\n");
+                out.push_str(&format!("{}\n\n", fence));
             }
             Kind::Path => {
                 let icon = if record.is_dir { "📁" } else { "📄" };
@@ -548,6 +512,24 @@ fn render_markdown(
         }
     }
     out
+}
+
+/// Pick a fence that's longer than the longest backtick run in the excerpt, so
+/// code containing ``` doesn't prematurely close the block. At least three.
+fn code_fence_for(lines: &[&str]) -> String {
+    let mut longest_run = 0usize;
+    for line in lines {
+        let mut run = 0usize;
+        for ch in line.chars() {
+            if ch == '`' {
+                run += 1;
+                longest_run = longest_run.max(run);
+            } else {
+                run = 0;
+            }
+        }
+    }
+    "`".repeat(longest_run.max(2) + 1)
 }
 
 fn short_sha_suffix(sha: &str) -> String {

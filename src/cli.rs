@@ -78,43 +78,34 @@ pub struct Cli {
 /// Examples block appended to `yoink --help`. Explains the headless mode the
 /// `-o/--output` flag unlocks and shows copy-pasteable invocations.
 const HEADLESS_HELP: &str = "\
-HEADLESS MODE (-o/--output):
-  Without -o, yoink launches the interactive TUI. With -o, it runs one search
-  and prints the results to stdout — for scripts, pipes, or feeding an LLM.
-  Every content match includes the file path, line, column, the matched line,
-  and -C/--context lines of code on each side (default 10). Add --blame (or use
-  a blame sort) to attach each match's commit date, author, and sha.
+HEADLESS MODE (-o/--output): run one search and print to stdout instead of the
+TUI — for scripts, pipes, or feeding an LLM. Each match carries the location plus
+-C/--context lines each side (default 10); --blame adds commit date/author/sha.
 
-FORMATS (-o <FORMAT>):
-  json      One object: metadata + a `results` array. The default for tooling.
-  jsonl     One result object per line, no envelope. Stream-friendly.
-  markdown  A heading per match with a fenced, line-numbered excerpt. Paste-ready.
-  text      grep-style `path:line: match` with `path-line-` context lines.
+  Formats: markdown (recommended — most readable and compact), json/jsonl (for
+  machine parsing), text (grep-style). Tip: add --max-results 30 (or 100) so a
+  broad query doesn't print thousands of lines.
 
-QUOTING THE QUERY:
-  There is no special delimiter — let your shell carry the query through, like
-  rg or grep. Single-quote it so spaces, \", $, and regex metacharacters survive.
-  For a query that starts with '-', use -q/--query or a '--' separator.
+  Quoting: single-quote the query so spaces, \", $, and regex survive (like rg).
+  For a query starting with '-', use -q/--query or a '--' separator.
 
 EXAMPLES:
-  yoink 'fn main(' -o json -m regex            # regex search, JSON output
-  yoink ejectReasons -o json                   # glob (default), JSON output
-  yoink 'TODO' -o markdown -C 5 > todos.md     # export 5 lines of context
-  yoink 'parseConfig' -o jsonl -s blame_young  # newest-blame first, one/line
-  yoink 'name = \"yoink\"' -o text -m regex      # literal double-quotes
-  yoink -q '-C' -m regex -o json               # query that starts with '-'
-  yoink 'panic' -o json --max-results 20       # cap to the first 20 results
-  yoink 'Handler' -o json --content-only       # skip name-only file/dir hits
+  yoink 'fn main(' -o markdown -m regex --max-results 30   # recommended
+  yoink 'TODO' -o markdown -C 5 > todos.md                 # export to a file
+  yoink 'parseConfig' -o json -s blame_young               # JSON, newest first
+  yoink 'name = \"yoink\"' -o text -m regex                  # literal quotes
+  yoink -q '-C' -m regex -o markdown                       # query starting '-'
 ";
 
 /// Output format for headless (`--output`) runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
-    /// One JSON object: query metadata plus a `results` array. Default for tooling.
+    /// One JSON object: query metadata plus a `results` array. For machine parsing.
     Json,
     /// One JSON object per line, one per result. Stream-friendly.
     Jsonl,
-    /// Markdown with a fenced, line-numbered excerpt per match. Paste-ready.
+    /// Heading + fenced, line-numbered excerpt per match. Recommended — most
+    /// readable and compact.
     Markdown,
     /// Plain grep-style text with context lines.
     Text,

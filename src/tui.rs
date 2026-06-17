@@ -227,9 +227,11 @@ struct SettingsDraft {
     mode: SearchMode,
     case: bool,
     sort: Sort,
+    update_check: bool,
     saved_mode: SearchMode,
     saved_case: bool,
     saved_sort: Sort,
+    saved_update_check: bool,
 }
 
 impl SettingsDraft {
@@ -238,14 +240,19 @@ impl SettingsDraft {
             mode: s.search_mode,
             case: s.case_sensitive,
             sort: s.sort,
+            update_check: s.update_check,
             saved_mode: s.search_mode,
             saved_case: s.case_sensitive,
             saved_sort: s.sort,
+            saved_update_check: s.update_check,
         }
     }
 
     fn dirty(&self) -> bool {
-        self.mode != self.saved_mode || self.case != self.saved_case || self.sort != self.saved_sort
+        self.mode != self.saved_mode
+            || self.case != self.saved_case
+            || self.sort != self.saved_sort
+            || self.update_check != self.saved_update_check
     }
 }
 
@@ -712,6 +719,9 @@ impl App {
                 let next = ((cur + dir) % len + len) % len;
                 self.settings_draft.sort = ORDER[next as usize];
             }
+            SettingsRow::UpdateCheck => {
+                self.settings_draft.update_check = !self.settings_draft.update_check;
+            }
             _ => {}
         }
     }
@@ -735,10 +745,12 @@ impl App {
         write_setting("search_mode", d.mode.token())?;
         write_setting("case_sensitive", if d.case { "true" } else { "false" })?;
         write_setting("sort", d.sort.token())?;
+        write_setting("update_check", if d.update_check { "true" } else { "false" })?;
         // The on-disk baseline now matches the draft → clean, Save greys out.
         self.settings_draft.saved_mode = d.mode;
         self.settings_draft.saved_case = d.case;
         self.settings_draft.saved_sort = d.sort;
+        self.settings_draft.saved_update_check = d.update_check;
         // Defaults apply to NEW sessions only; the live session keeps whatever
         // F3/F4/F5 selected, so self.settings is intentionally untouched.
         self.flash_msg("defaults saved — applies to new sessions");
@@ -1762,6 +1774,7 @@ impl App {
             Sort::BlameYoung => "youngest blame first",
             Sort::BlameOld => "oldest blame first",
         };
+        let update_check_label = if draft.update_check { "on" } else { "off" };
 
         // A value row: indented label + a cyan `‹ value ›` showing it cycles.
         let value_row = |label: &str, value: &str| {
@@ -1791,6 +1804,7 @@ impl App {
                 SettingsRow::Mode => value_row("search mode", mode_label),
                 SettingsRow::Case => value_row("sensitivity", case_label),
                 SettingsRow::Sort => value_row("sorting", sort_label),
+                SettingsRow::UpdateCheck => value_row("update check", update_check_label),
                 SettingsRow::Save => {
                     if dirty {
                         Line::from(vec![
@@ -1965,17 +1979,19 @@ enum SettingsRow {
     Mode,
     Case,
     Sort,
+    UpdateCheck,
     Save,
     Blank,
     EditConfig,
     ShowDefault,
 }
 
-const SETTINGS_ROWS: [SettingsRow; 8] = [
+const SETTINGS_ROWS: [SettingsRow; 9] = [
     SettingsRow::Header,
     SettingsRow::Mode,
     SettingsRow::Case,
     SettingsRow::Sort,
+    SettingsRow::UpdateCheck,
     SettingsRow::Save,
     SettingsRow::Blank,
     SettingsRow::EditConfig,

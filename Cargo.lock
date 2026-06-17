@@ -680,6 +680,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -1178,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "yoink"
-version = "0.1.0"
+version = "3.2.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -1187,6 +1188,8 @@ dependencies = [
  "globset",
  "ratatui",
  "regex",
+ "serde",
+ "serde_json",
  "tempfile",
  "walkdir",
  "which",

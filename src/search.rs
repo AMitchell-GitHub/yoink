@@ -97,6 +97,8 @@ pub struct YoinkSettings {
     pub search_mode: SearchMode,
     pub case_sensitive: bool,
     pub sort: Sort,
+    /// Whether to check GitHub for a newer release on startup. Default true.
+    pub update_check: bool,
     pub binds: Binds,
     /// Path the settings were loaded from (or would be written to if config
     /// doesn't exist yet). `None` if no $HOME is available.
@@ -153,6 +155,7 @@ pub fn load_settings() -> Result<YoinkSettings> {
     let mut search_mode = SearchMode::Glob;
     let mut case_sensitive = false;
     let mut sort = Sort::Depth;
+    let mut update_check = true;
     let mut binds: Binds = Vec::new();
     // Globs default to the built-in safe set when no config exists at all
     // (e.g. the `yoink __search` headless path with no $HOME). Once a config
@@ -246,6 +249,15 @@ pub fn load_settings() -> Result<YoinkSettings> {
                             })?;
                             continue;
                         }
+                        "update_check" => {
+                            update_check = parse_bool_setting(value).with_context(|| {
+                                format!(
+                                    "invalid update_check value in {}: {value}",
+                                    config_file.display()
+                                )
+                            })?;
+                            continue;
+                        }
                         _ => {}
                     }
                 }
@@ -276,6 +288,7 @@ pub fn load_settings() -> Result<YoinkSettings> {
         search_mode,
         case_sensitive,
         sort,
+        update_check,
         binds,
         source_path: source,
     })

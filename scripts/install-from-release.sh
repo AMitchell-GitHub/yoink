@@ -276,55 +276,139 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Shell helper function  (lets yoink cd into directories)
 # ---------------------------------------------------------------------------
-echo
-if [[ -n "$rc_file" ]] && grep -q 'command yoink' "$rc_file" 2>/dev/null; then
-  # Already present — no need to re-explain or re-prompt.
-  ok "yoink() shell function already exists in ${rc_file}"
-else
-  info "Optional: shell helper function"
-  echo
-  echo "  By default, running 'yoink' prints the path of the selected result."
-  echo "  If you'd like yoink to automatically cd into the result's directory,"
-  echo "  a small wrapper function is needed in your shell config."
-  echo
-  echo "  The function:"
-  echo
-  printf "    ${BOLD}yoink() {${NC}\n"
-  printf "    ${BOLD}  local target${NC}\n"
-  printf "    ${BOLD}  target=\"\$(command yoink \"\$@\")\" || return${NC}\n"
-  printf "    ${BOLD}  [[ -n \"\$target\" ]] && cd \"\$target\"${NC}\n"
-  printf "    ${BOLD}}${NC}\n"
-  echo
-  echo "  It runs the real yoink binary, captures the path it outputs,"
-  echo "  then cd's your shell into that directory. Without this, yoink"
-  echo "  can only print the path (a subprocess cannot change the parent"
-  echo "  shell's working directory)."
-  echo
+# Version being installed, stamped into the managed block so a later install
+# can see which version wrote it. Taken from the release tag resolved above.
+YOINK_VERSION="${tag#v}"
+[[ -n "$YOINK_VERSION" ]] || YOINK_VERSION="unknown"
 
-  if [[ -n "$rc_file" ]]; then
-    if ask_yes_no "  Add the yoink() function to ${rc_file}?"; then
-      cat >> "$rc_file" <<'FUNC'
+# The canonical shell function yoink manages in your rc file, delimited by the
+# markers below and stamped with the installing version. Markers + version mean
+# every future install can find and rewrite it *in place* — whether the user
+# has the current version, an older marked version, or the legacy unmarked
+# function from before these markers existed. Any version bump (or body change)
+# makes the canonical block differ from what's there, so the diff below detects
+# it and offers the update.
+YOINK_FN_BEGIN='# >>> yoink shell function (managed by yoink installer - do not edit) >>>'
 
-# yoink: cd into the directory of the selected search result
+emit_yoink_block() {
+  sed "s/__YOINK_VERSION__/${YOINK_VERSION}/g" <<'FUNC'
+# >>> yoink shell function (managed by yoink installer - do not edit) >>>
+# Created by yoink v__YOINK_VERSION__.
+# You can move this whole section anywhere in your profile. Editing inside it is
+# not recommended -- your changes will likely be overwritten on the next yoink
+# update.
+# Behavior: in the interactive TUI this cd's into the selected result; with
+# -o/--output or when the output is piped, yoink runs directly so its results
+# pass straight through.
 yoink() {
+  if [[ ! -t 1 ]]; then command yoink "$@"; return; fi
+  local arg
+  for arg in "$@"; do
+    case "$arg" in -o*|--output*) command yoink "$@"; return ;; esac
+  done
   local target
   target="$(command yoink "$@")" || return
   [[ -n "$target" ]] && cd "$target"
 }
+# <<< yoink shell function <<<
 FUNC
-      ok "Added yoink() function to ${rc_file}"
+}
+
+# Emit $1's contents with the managed block inserted or updated *in place*:
+#   * marked block present   -> replace the lines between the markers
+#   * legacy yoink() present -> replace the function (+ its leading "# yoink"
+#                               comments) where it sits, wrapping it in markers
+#   * neither                -> append the block after a blank-line separator
+build_proposed_rcfile() {
+  local rc="$1" canon="$2"
+  if [[ -f "$rc" ]] && grep -qF -- "$YOINK_FN_BEGIN" "$rc"; then
+    awk -v canon="$canon" '
+      BEGIN { while ((getline l < canon) > 0) c[++n] = l }
+      index($0, "# >>> yoink shell function") == 1 { for (i=1;i<=n;i++) print c[i]; inb=1; next }
+      inb { if (index($0, "# <<< yoink shell function") == 1) inb=0; next }
+      { print }
+    ' "$rc"
+  elif [[ -f "$rc" ]] && grep -q '^yoink()[[:space:]]*{' "$rc"; then
+    awk -v canon="$canon" '
+      BEGIN { while ((getline l < canon) > 0) c[++n] = l }
+      /^[[:space:]]*#[[:space:]]*yoink/ { pending = pending $0 ORS; next }
+      skip == 1 { if ($0 ~ /^}/) { skip = 0; for (i=1;i<=n;i++) print c[i] } next }
+      /^yoink\(\)[[:space:]]*\{/ { pending = ""; skip = 1; next }
+      { if (pending != "") { printf "%s", pending; pending = "" } print }
+      END { if (pending != "") printf "%s", pending }
+    ' "$rc"
+  else
+    if [[ -f "$rc" ]]; then
+      cat "$rc"
+      if [[ -s "$rc" && -n "$(tail -c1 "$rc")" ]]; then printf '\n'; fi
+      printf '\n'
+    fi
+    cat "$canon"
+  fi
+}
+
+echo
+if [[ -z "$rc_file" ]]; then
+  warn "Could not detect your shell config file."
+  echo "  Add this to your ~/.bashrc or ~/.zshrc so 'yoink' can cd into results:"
+  echo
+  emit_yoink_block | sed 's/^/    /'
+  echo
+else
+  yoink_canon="$(mktemp)"
+  yoink_proposed="$(mktemp)"
+  emit_yoink_block > "$yoink_canon"
+  build_proposed_rcfile "$rc_file" "$yoink_canon" > "$yoink_proposed"
+  yoink_base="$rc_file"
+  [[ -f "$yoink_base" ]] || yoink_base=/dev/null
+
+  if diff -q "$yoink_base" "$yoink_proposed" >/dev/null 2>&1; then
+    ok "yoink() shell function is already up to date in ${rc_file}"
+  else
+    existing_ver="$(grep -m1 -oE 'Created by yoink v[0-9]+(\.[0-9]+)*' "$rc_file" 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)*' | head -n1 || true)"
+    if [[ -n "$existing_ver" && "$existing_ver" != "$YOINK_VERSION" ]]; then
+      info "Updating the yoink shell function: v${existing_ver} -> v${YOINK_VERSION}."
+    elif [[ -n "$existing_ver" ]]; then
+      info "Refreshing the yoink shell function (v${existing_ver}; it looks modified)."
+    else
+      info "Installing the yoink shell function (v${YOINK_VERSION})."
+    fi
+    info "It cd's into a result in the TUI; headless (-o/--output) and piped output pass through."
+    echo
+    echo "  Proposed changes to ${rc_file}:"
+    echo
+    # Indent and colorize the unified diff: green additions, red removals, blue
+    # hunk headers, bold file headers. (awk's -v turns the \033 in the color
+    # vars into real escapes.)
+    diff -u "$yoink_base" "$yoink_proposed" 2>/dev/null | awk \
+      -v g="$GREEN" -v r="$RED" -v b="$BLUE" -v bold="$BOLD" -v nc="$NC" '
+      /^\+\+\+/ || /^---/ { printf "    %s%s%s\n", bold, $0, nc; next }
+      /^@@/               { printf "    %s%s%s\n", b, $0, nc; next }
+      /^\+/               { printf "    %s%s%s\n", g, $0, nc; next }
+      /^-/                { printf "    %s%s%s\n", r, $0, nc; next }
+      { printf "    %s\n", $0 }
+    ' || true
+    echo
+    if ask_yes_no "  Apply these changes to ${rc_file}?"; then
+      if [[ -f "$rc_file" ]]; then
+        if cp "$rc_file" "${rc_file}.yoink.bak"; then
+          info "Backed up previous config to ${rc_file}.yoink.bak"
+        else
+          warn "Could not back up ${rc_file} (continuing anyway)."
+        fi
+      fi
+      cat "$yoink_proposed" > "$rc_file"
+      ok "Updated the yoink() function in ${rc_file}"
       echo
       warn "To start using it in this terminal, run:"
       printf "    ${BOLD}source ${rc_file}${NC}\n"
       echo
       echo "  Or just open a new terminal window."
     else
-      info "Skipped. You can always add it manually later."
+      info "Skipped. No changes were made to ${rc_file}."
     fi
-  else
-    warn "Could not detect your shell config file."
-    echo "  Add the yoink() function shown above to your ~/.bashrc or ~/.zshrc manually."
   fi
+  rm -f "$yoink_canon" "$yoink_proposed"
 fi
 
 # ---------------------------------------------------------------------------

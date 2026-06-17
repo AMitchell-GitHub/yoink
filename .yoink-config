@@ -39,6 +39,12 @@ case_sensitive = false
 #   blame_old     — oldest `git blame` first
 sort = depth
 
+# Check GitHub for a newer yoink release on startup (at most once per day; the
+# result is cached so it never slows a launch more than once a day). When a
+# newer version is found, yoink offers to update itself — the install takes
+# ~10s and needs almost no input. Set to false to disable the check.
+update_check = true
+
 
 # ─── walking ─────────────────────────────────────────────────────────────────
 # What yoink does and doesn't descend into during a search. These mirror

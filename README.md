@@ -85,6 +85,11 @@ Each content match carries the file path, line, column, the matched line, and
 blame sort — or `--blame` — every result also gets its commit date, author, and
 sha.
 
+**`markdown` is the recommended format** — it's the most readable and compact,
+for both humans and LLMs; reach for `json`/`jsonl` only when you need to parse
+fields. For a broad query, cap the output with `--max-results 30` (or `100`) so
+you don't get thousands of lines.
+
 ### Flags
 
 | Flag | Values | Notes |
@@ -121,8 +126,10 @@ a `--` separator: `yoink -o json -- '-C'`.
 
 - **`json`** — one object: query metadata (`mode`, `sort`, `case`, `root`,
   `count`, `total_matches`, `truncated`) plus a `results` array. Each result:
-  `kind` (`content` or `path`), `path`, `is_dir`, `line`, `column`, `match`,
-  `context_before`, `context_after`, `context_start_line`, and `blame`.
+  `kind` (`content` or `path`), `path`, `is_dir`, `line`, `column`, `match`
+  (the hit line), `context_start_line`, `context` (the matched line plus the
+  lines before and after, in order), and `blame`. Pretty-printed; fields that
+  don't apply (e.g. `line`/`match`/`context` on a `path` hit) are omitted.
 - **`jsonl`** — one result object per line, no envelope. Stream-friendly and
   easy to `grep`/`jq -c`.
 - **`markdown`** — a heading per match with a fenced, line-numbered excerpt (the
@@ -182,11 +189,23 @@ If you want `yoink` itself to change directory, add this shell function to your 
 
 ```bash
 yoink() {
+  # Headless output (-o/--output) or piped stdout: run yoink directly so the
+  # results reach your terminal/pipe untouched. The cd capture is TUI-only.
+  if [[ ! -t 1 ]]; then command yoink "$@"; return; fi
+  local arg
+  for arg in "$@"; do
+    case "$arg" in -o*|--output*) command yoink "$@"; return ;; esac
+  done
   local target
   target="$(command yoink "$@")" || return
   [[ -n "$target" ]] && cd "$target"
 }
 ```
+
+> **Important:** if you already have the older one-line wrapper, you must update
+> it — the old version captures headless (`-o/--output`) output and tries to
+> `cd` into it, producing a `cd: no such file or directory` error and breaking
+> pipes like `yoink foo -o json | clipboard`.
 
 ## Config (`~/.yoink-config`)
 
@@ -201,7 +220,7 @@ browse the shipped reference (read-only) with **F2 → "Show default config
 
 Sections in order:
 
-- **defaults** — `search_mode` (glob | regex), `case_sensitive` (true | false), `sort` (depth | alphabetical | blame_young | blame_old). These are the *new-session* defaults; **F2 → Save** writes them. The inline **F3 / F4 / F5** pickers override them for the current session only and never touch the file.
+- **defaults** — `search_mode` (glob | regex), `case_sensitive` (true | false), `sort` (depth | alphabetical | blame_young | blame_old), `update_check` (true | false). These are the *new-session* defaults; **F2 → Save** writes them. The inline **F3 / F4 / F5** pickers override them for the current session only and never touch the file.
 - **walking** — `include_hidden`, `include_mounts`, `include_symlinks` (all `false` by default).
 - **ignored paths** — glob patterns, one per line. Default: `.git/**`, `node_modules/**`.
 - **keybinds** — `bind.<key> = <action>`. **Config-only**: a key has no behavior unless it's listed here, and that includes every `Ctrl-*` chord (no built-in defaults). Result actions: `cd`, `vim`, `vi`, `nano`, `cat`, `vscode`, `sublime`, `explorer`, `copy_path`, `copy_name`. Query-editing actions: `clear_query`, `delete_word`, `line_start`, `line_end`. If a key collides across binds (or with a built-in), the built-in — or else the first matching bind line — wins and the rest do nothing; yoink lists **every** such conflict in a startup warning.
@@ -209,3 +228,20 @@ Sections in order:
 Built-in keys (↑/↓/PgUp/PgDn/Esc/F1/F2/F3/F4/F5/Ctrl-C) are always available and can't be rebound. `Enter` is reserved — it always runs the search. `?` is deliberately *not* a built-in key so it can be typed into the query (glob wildcard / regex `(?i)` flags).
 
 The easiest way to change the persisted defaults is **F2 → Settings** inside the tool; the inline **F3 / F4 / F5** pickers change only the current session.
+
+## Staying up to date
+
+On an interactive launch, yoink quietly checks GitHub for a newer release — at
+most **once per day** (the result is cached, so it never slows a launch more
+than that) and only when stdout is a real terminal (never in headless `-o`
+runs, pipes, or scripts). If a newer version exists, yoink shows what changed
+and offers to update itself:
+
+- Accept and yoink runs the same installer from [Install](#install-recommended)
+  for you — about **10 seconds**, minimal input — then **restarts into the new
+  version** automatically.
+- Decline and it won't ask again for that version.
+
+Turn it off with `update_check = false` in `~/.yoink-config`. The check is
+entirely best-effort: no network, no `curl`, or a failed request just falls
+through to a normal launch.

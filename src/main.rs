@@ -6,6 +6,7 @@ mod keys;
 mod search;
 mod settings;
 mod tui;
+mod update;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -78,6 +79,13 @@ fn run() -> Result<()> {
 
     ensure_dependency("rg")?;
     ensure_dependency("bat")?;
+
+    // Best-effort: offer to self-update before taking over the screen. Honors
+    // the `update_check` config key (default on); never blocks the launch.
+    let update_enabled = search::load_settings()
+        .map(|settings| settings.update_check)
+        .unwrap_or(true);
+    update::run_startup_update_check(update_enabled);
 
     let query = cli.query_flag.as_deref().or(cli.query.as_deref());
     tui::run_session(query, &cwd)?;
