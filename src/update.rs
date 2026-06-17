@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const REPO: &str = "AMitchell-GitHub/yoink";
@@ -51,10 +51,14 @@ pub fn run_startup_update_check(enabled: bool) {
     if !enabled || env::var_os(SKIP_ENV).is_some() {
         return;
     }
-    // Only interactive launches — never when piped/redirected or in a script.
-    if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
+    // Talk to the controlling terminal directly. yoink's cd-wrapper captures
+    // the binary's stdout (the TUI renders to stderr), so gating on stdout — or
+    // printing the prompt there — would skip the check / pollute the cd target.
+    // Opening /dev/tty sidesteps that and doubles as the "are we interactive?"
+    // gate: it won't open under cron, CI, or fully-redirected runs.
+    let Some(mut tty) = open_tty() else {
         return;
-    }
+    };
     if which::which("curl").is_err() {
         return;
     }
@@ -89,14 +93,18 @@ pub fn run_startup_update_check(enabled: bool) {
         return;
     }
 
-    match prompt(current, &latest, &cache.notes) {
-        Choice::Accepted => match run_installer() {
-            Ok(()) => restart_or_notify(),
-            Err(error) => {
-                eprintln!("yoink: update failed: {error}");
-                eprintln!("yoink: continuing with the current version.");
+    match prompt(&mut tty, current, &latest, &cache.notes) {
+        Choice::Accepted => {
+            let _ = writeln!(tty, "\nyoink: updating…");
+            let _ = tty.flush();
+            match run_installer() {
+                Ok(()) => restart_or_notify(&mut tty),
+                Err(error) => {
+                    let _ = writeln!(tty, "yoink: update failed: {error}");
+                    let _ = writeln!(tty, "yoink: continuing with the current version.");
+                }
             }
-        },
+        }
         Choice::Declined => {
             cache.declined_version = latest;
             let _ = write_cache(&cache_path, &cache);
@@ -105,40 +113,62 @@ pub fn run_startup_update_check(enabled: bool) {
     }
 }
 
+/// Open the controlling terminal for the update prompt's I/O. `None` (skip the
+/// check) when there's no tty — cron, CI, or non-unix.
+#[cfg(unix)]
+fn open_tty() -> Option<std::fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()
+}
+
+#[cfg(not(unix))]
+fn open_tty() -> Option<std::fs::File> {
+    None
+}
+
 enum Choice {
     Accepted,
     Declined,
     NoInput,
 }
 
-fn prompt(current: &str, latest: &str, notes: &str) -> Choice {
-    let mut out = io::stdout();
+fn prompt(tty: &mut std::fs::File, current: &str, latest: &str, notes: &str) -> Choice {
     let _ = writeln!(
-        out,
+        tty,
         "\n{BOLD}{CYAN}A new yoink release is available.{RESET}  \
 {DIM}(you have v{current}, latest is v{latest}){RESET}"
     );
 
     let formatted = format_notes(notes);
     if !formatted.is_empty() {
-        let _ = writeln!(out, "\n{BOLD}What's new in v{latest}:{RESET}\n{formatted}");
+        let _ = writeln!(tty, "\n{BOLD}What's new in v{latest}:{RESET}\n{formatted}");
     }
 
     let _ = writeln!(
-        out,
+        tty,
         "yoink can update itself now — it takes about 10 seconds and needs almost \
 no input."
     );
     let _ = writeln!(
-        out,
+        tty,
         "{DIM}(Disable this check with `update_check = false` in ~/.yoink-config.){RESET}"
     );
-    let _ = write!(out, "{BOLD}Update now?{RESET} [y/N]: ");
-    let _ = out.flush();
+    let _ = write!(tty, "{BOLD}Update now?{RESET} [y/N]: ");
+    let _ = tty.flush();
 
+    // Read the answer from the same terminal (stdin may be captured/redirected
+    // by the cd-wrapper, so don't rely on it).
+    let reader_handle = match tty.try_clone() {
+        Ok(handle) => handle,
+        Err(_) => return Choice::NoInput,
+    };
     let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_err() {
-        return Choice::NoInput;
+    match BufReader::new(reader_handle).read_line(&mut line) {
+        Ok(0) | Err(_) => return Choice::NoInput,
+        Ok(_) => {}
     }
     match line.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Choice::Accepted,
@@ -151,18 +181,22 @@ no input."
 /// than piped into `bash`) precisely so its `read` prompts read from the
 /// terminal instead of consuming the piped script.
 fn run_installer() -> Result<()> {
-    println!("\nyoink: updating…");
     let script = env::temp_dir().join("yoink-update-install.sh");
     let command = format!(
         "curl -fsSL '{}' -o '{script}' && bash '{script}' '{REPO}'",
         INSTALL_SCRIPT_URL,
         script = script.display(),
     );
-    let status = Command::new("bash")
-        .arg("-c")
-        .arg(&command)
-        .status()
-        .context("failed to launch the installer")?;
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(&command);
+    // Connect the installer to the terminal directly so its own prompts are
+    // visible and aren't swallowed by the cd-wrapper's stdout capture.
+    if let (Some(stdin), Some(stdout), Some(stderr)) = (open_tty(), open_tty(), open_tty()) {
+        cmd.stdin(Stdio::from(stdin))
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+    }
+    let status = cmd.status().context("failed to launch the installer")?;
     let _ = fs::remove_file(&script);
     if !status.success() {
         anyhow::bail!("installer exited with {status}");
@@ -173,7 +207,7 @@ fn run_installer() -> Result<()> {
 /// Replace the current process with the freshly-installed binary so the user
 /// lands in the new version immediately. Falls back to a message if exec isn't
 /// possible.
-fn restart_or_notify() -> ! {
+fn restart_or_notify(tty: &mut std::fs::File) -> ! {
     let target = installed_binary();
     let args: Vec<String> = env::args().skip(1).collect();
 
@@ -182,7 +216,10 @@ fn restart_or_notify() -> ! {
         use std::os::unix::process::CommandExt;
         // exec only returns if it failed.
         let error = Command::new(&target).args(&args).env(SKIP_ENV, "1").exec();
-        eprintln!("yoink: updated, but couldn't restart automatically ({error}).");
+        let _ = writeln!(
+            tty,
+            "yoink: updated, but couldn't restart automatically ({error})."
+        );
     }
 
     #[cfg(not(unix))]
@@ -190,7 +227,10 @@ fn restart_or_notify() -> ! {
         let _ = (&target, &args);
     }
 
-    println!("yoink updated — run `yoink` again to use the new version.");
+    let _ = writeln!(
+        tty,
+        "yoink updated — run `yoink` again to use the new version."
+    );
     std::process::exit(0);
 }
 

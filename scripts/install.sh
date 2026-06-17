@@ -253,14 +253,14 @@ emit_yoink_block() {
 # You can move this whole section anywhere in your profile. Editing inside it is
 # not recommended -- your changes will likely be overwritten on the next yoink
 # update.
-# Behavior: in the interactive TUI this cd's into the selected result; with
-# -o/--output or when the output is piped, yoink runs directly so its results
-# pass straight through.
+# Behavior: in the interactive TUI this cd's into the selected result. For
+# -o/--output, --help/--version, or piped output, yoink runs directly so its
+# output reaches you untouched (otherwise the cd-capture would swallow it).
 yoink() {
   if [[ ! -t 1 ]]; then command yoink "$@"; return; fi
   local arg
   for arg in "$@"; do
-    case "$arg" in -o*|--output*) command yoink "$@"; return ;; esac
+    case "$arg" in -o*|--output*|-h|--help|-V|--version) command yoink "$@"; return ;; esac
   done
   local target
   target="$(command yoink "$@")" || return

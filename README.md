@@ -189,12 +189,12 @@ If you want `yoink` itself to change directory, add this shell function to your 
 
 ```bash
 yoink() {
-  # Headless output (-o/--output) or piped stdout: run yoink directly so the
-  # results reach your terminal/pipe untouched. The cd capture is TUI-only.
+  # -o/--output, --help/--version, or piped stdout: run yoink directly so its
+  # output reaches you untouched. The cd-capture below is for the TUI only.
   if [[ ! -t 1 ]]; then command yoink "$@"; return; fi
   local arg
   for arg in "$@"; do
-    case "$arg" in -o*|--output*) command yoink "$@"; return ;; esac
+    case "$arg" in -o*|--output*|-h|--help|-V|--version) command yoink "$@"; return ;; esac
   done
   local target
   target="$(command yoink "$@")" || return
@@ -202,10 +202,11 @@ yoink() {
 }
 ```
 
-> **Important:** if you already have the older one-line wrapper, you must update
-> it — the old version captures headless (`-o/--output`) output and tries to
-> `cd` into it, producing a `cd: no such file or directory` error and breaking
-> pipes like `yoink foo -o json | clipboard`.
+> **Important:** update any older wrapper you already have. Earlier versions
+> capture `command yoink`'s stdout unconditionally, so `--output`, `--help`, and
+> `--version` get fed to `cd` (producing `cd: no such file or directory: …`) and
+> pipes like `yoink foo -o json | clipboard` break. The installer offers to
+> update it for you.
 
 ## Config (`~/.yoink-config`)
 
