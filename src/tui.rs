@@ -482,9 +482,14 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, terminal: &mut Tui) -> Result<()> {
-        // Dismiss overlays on Esc.
-        if matches!(key.code, KeyCode::Esc) && self.overlay != Overlay::None {
-            self.overlay = Overlay::None;
+        // Esc closes an open overlay; with no overlay open it quits yoink
+        // (same clean exit as Ctrl-C, no cd).
+        if matches!(key.code, KeyCode::Esc) {
+            if self.overlay != Overlay::None {
+                self.overlay = Overlay::None;
+            } else {
+                self.quit = true;
+            }
             return Ok(());
         }
 
@@ -1620,7 +1625,10 @@ impl App {
         lines.push(Line::from(""));
         lines.push(help_row("Enter", "run the search"));
         lines.push(help_row("↑ / ↓ / PgUp / PgDn", "move selection"));
-        lines.push(help_row("Esc", "close overlay / clear focus"));
+        lines.push(help_row(
+            "Esc",
+            "close overlay, or quit yoink if none is open",
+        ));
         lines.push(help_row(builtin::QUIT.label, builtin::QUIT.desc));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
@@ -2122,7 +2130,7 @@ fn reserved_keys() -> Vec<(KeyBind, &'static str)> {
     // Navigation / search keys are reserved too, though rarely bound.
     for (spec, desc) in [
         ("enter", "run search"),
-        ("esc", "close overlay"),
+        ("esc", "close overlay / quit"),
         ("up", "move up"),
         ("down", "move down"),
         ("pageup", "page up"),

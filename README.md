@@ -149,7 +149,7 @@ Always available, no menu required:
   These three pickers are **session-only** — the choice applies until you quit and is never written to the config. To change the default for new sessions, use **F2 → edit the values → Save**.
 - **F1** — show the full bindings list overlay (`?` is left free so it can be typed into the query — it's a glob wildcard and part of regex flags like `(?i)`)
 - **F2** — settings overlay: edit the per-session defaults (search mode / sensitivity / sorting) with ←/→ and **Save** them, edit the config file, or view the shipped reference. Save writes the defaults for *new* sessions and leaves the current one alone.
-- **Esc** — close any overlay
+- **Esc** — close any open overlay; with no overlay open, quit yoink (like Ctrl-C)
 - **Ctrl-C** — quit
 
 Everything else is opt-in via `bind.<key> = <action>` in `~/.yoink-config` — a key does nothing unless you bind it (there are no default `Ctrl-*` chords). Two kinds of actions: ones that act on the highlighted result, and ones that edit the query box. The shipped config wires up these:
