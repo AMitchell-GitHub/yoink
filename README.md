@@ -218,6 +218,11 @@ Reopen the file from inside yoink with **F2 → "Edit config file"**, or
 browse the shipped reference (read-only) with **F2 → "Show default config
 (reference)"** if you've made your file messy and want to see the original.
 
+**F2 → "Add headless guide to ~/.claude/CLAUDE.md"** drops a short crib sheet on
+yoink's headless (`-o/--output`) mode into your global Claude Code instructions,
+so an agent working in your repos knows how to drive yoink. It's written between
+markers and refreshed in place on repeat use (no duplicates).
+
 Sections in order:
 
 - **defaults** — `search_mode` (glob | regex), `case_sensitive` (true | false), `sort` (depth | alphabetical | blame_young | blame_old), `update_check` (true | false). These are the *new-session* defaults; **F2 → Save** writes them. The inline **F3 / F4 / F5** pickers override them for the current session only and never touch the file.

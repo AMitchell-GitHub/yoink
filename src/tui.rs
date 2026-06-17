@@ -735,9 +735,20 @@ impl App {
             }
             SettingsRow::EditConfig => self.edit_config_file(terminal)?,
             SettingsRow::ShowDefault => show_in_pager(DEFAULT_CONFIG_REFERENCE, terminal)?,
+            SettingsRow::AddClaudeGuide => self.add_claude_guide(),
             _ => {}
         }
         Ok(())
+    }
+
+    /// Write (or refresh) the yoink headless-mode guide in the user's
+    /// `~/.claude/CLAUDE.md`, so an agent picking up the repo knows how to drive
+    /// yoink headless. Never fails the session — surfaces the outcome via flash.
+    fn add_claude_guide(&mut self) {
+        match write_claude_guide() {
+            Ok(path) => self.flash_msg(&format!("added yoink guide to {}", path.display())),
+            Err(error) => self.flash_msg(&format!("couldn't update CLAUDE.md: {error}")),
+        }
     }
 
     fn save_default_settings(&mut self) -> Result<()> {
@@ -745,7 +756,10 @@ impl App {
         write_setting("search_mode", d.mode.token())?;
         write_setting("case_sensitive", if d.case { "true" } else { "false" })?;
         write_setting("sort", d.sort.token())?;
-        write_setting("update_check", if d.update_check { "true" } else { "false" })?;
+        write_setting(
+            "update_check",
+            if d.update_check { "true" } else { "false" },
+        )?;
         // The on-disk baseline now matches the draft → clean, Save greys out.
         self.settings_draft.saved_mode = d.mode;
         self.settings_draft.saved_case = d.case;
@@ -1841,6 +1855,13 @@ impl App {
                         Style::default().fg(Color::White),
                     ),
                 ]),
+                SettingsRow::AddClaudeGuide => Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        "Add headless guide to ~/.claude/CLAUDE.md",
+                        Style::default().fg(Color::White),
+                    ),
+                ]),
             };
             items.push(ListItem::new(line));
         }
@@ -1984,9 +2005,10 @@ enum SettingsRow {
     Blank,
     EditConfig,
     ShowDefault,
+    AddClaudeGuide,
 }
 
-const SETTINGS_ROWS: [SettingsRow; 9] = [
+const SETTINGS_ROWS: [SettingsRow; 10] = [
     SettingsRow::Header,
     SettingsRow::Mode,
     SettingsRow::Case,
@@ -1996,10 +2018,97 @@ const SETTINGS_ROWS: [SettingsRow; 9] = [
     SettingsRow::Blank,
     SettingsRow::EditConfig,
     SettingsRow::ShowDefault,
+    SettingsRow::AddClaudeGuide,
 ];
 
 fn settings_row_index(row: SettingsRow) -> usize {
     SETTINGS_ROWS.iter().position(|r| *r == row).unwrap_or(0)
+}
+
+const CLAUDE_GUIDE_BEGIN: &str = "<!-- >>> yoink headless guide (managed by yoink) >>> -->";
+const CLAUDE_GUIDE_END: &str = "<!-- <<< yoink headless guide <<< -->";
+
+/// The headless-mode crib sheet written into a user's `~/.claude/CLAUDE.md`,
+/// fenced by HTML-comment markers so a later write can find and replace it in
+/// place. Mirrors the `yoink --help` headless section and recommends markdown
+/// output plus a `--max-results` cap.
+const CLAUDE_GUIDE: &str = r#"<!-- >>> yoink headless guide (managed by yoink) >>> -->
+# yoink — headless code search (for LLM/agent use)
+
+`yoink` is a ripgrep-backed search tool. No flags → interactive TUI (don't run
+headless). Pass `-o/--output <FORMAT>` for a one-shot search that prints to
+stdout — use it to grep a codebase. Searches file/folder *names* and *contents*.
+Each match gives the location plus `-C/--context` lines each side (default 10).
+
+**Use `-o markdown`** — it's the most readable/compact format. Use `json`/`jsonl`
+only when you need to parse fields. **Always cap with `--max-results 30`** (or
+~100) so a broad query doesn't dump thousands of lines. `yoink --help` has more.
+
+```sh
+yoink 'parseConfig' -o markdown -m regex --max-results 30   # the usual call
+yoink 'TODO' -o markdown -s blame_young                     # newest-blame first
+yoink 'name = "yoink"' -o json -m regex                     # JSON for parsing
+yoink -q '-C' -m regex -o markdown                          # query starting '-'
+```
+
+## Flags
+- `-m, --mode <glob|regex>` — glob is default; regex for real patterns.
+- `-s, --sort <depth|alphabetical|blame_young|blame_old>` — `blame_young` = newest first.
+- `--case <sensitive|insensitive>`, `-C, --context <N>` (default 10), `--blame`, `--content-only`.
+- `-q, --query <SEARCH>` — query as a flag; use it when the query starts with `-`.
+- Overrides apply to the run only; config is never written. Single-quote the query so spaces/quotes/regex survive (like `rg`).
+<!-- <<< yoink headless guide <<< -->
+"#;
+
+/// Write — or refresh in place — the yoink guide block in `~/.claude/CLAUDE.md`,
+/// creating the file and its directory if needed. Returns the path written.
+fn write_claude_guide() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").context("no $HOME to locate ~/.claude/CLAUDE.md")?;
+    let path = PathBuf::from(home).join(".claude").join("CLAUDE.md");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = upsert_claude_guide(&existing, CLAUDE_GUIDE);
+
+    // Atomic replace so a write error can't truncate an existing CLAUDE.md.
+    let tmp = path.with_extension("md.yoink-tmp");
+    std::fs::write(&tmp, updated.as_bytes())
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(path)
+}
+
+/// Insert `section` into `existing`, replacing any prior managed block (between
+/// the markers) in place, otherwise appending it after a blank-line separator.
+fn upsert_claude_guide(existing: &str, section: &str) -> String {
+    if let (Some(start), Some(end_at)) = (
+        existing.find(CLAUDE_GUIDE_BEGIN),
+        existing.find(CLAUDE_GUIDE_END),
+    ) {
+        let end = end_at + CLAUDE_GUIDE_END.len();
+        if end >= start {
+            let mut out = String::with_capacity(existing.len() + section.len());
+            out.push_str(&existing[..start]);
+            out.push_str(section.trim_end_matches('\n'));
+            out.push_str(&existing[end..]);
+            return out;
+        }
+    }
+    let mut out = existing.to_string();
+    if !out.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str(section);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Reserved, non-rebindable keys, paired with what they do. Used only to flag
@@ -2294,6 +2403,37 @@ mod tests {
 
     fn kb(spec: &str) -> KeyBind {
         KeyBind::parse(spec).unwrap()
+    }
+
+    #[test]
+    fn claude_guide_appends_to_existing_content() {
+        let out = upsert_claude_guide("# My notes\n\nhello\n", CLAUDE_GUIDE);
+        assert!(
+            out.starts_with("# My notes\n\nhello\n"),
+            "preserves existing"
+        );
+        assert!(out.contains(CLAUDE_GUIDE_BEGIN) && out.contains(CLAUDE_GUIDE_END));
+        assert_eq!(out.matches(CLAUDE_GUIDE_BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn claude_guide_replaces_in_place_and_is_idempotent() {
+        let base = format!("top\n\n{}\n\nbottom\n", CLAUDE_GUIDE.trim_end());
+        let once = upsert_claude_guide(&base, CLAUDE_GUIDE);
+        // Surrounding content is preserved and the block isn't duplicated.
+        assert!(once.starts_with("top\n"), "got: {once}");
+        assert!(once.trim_end().ends_with("bottom"), "got: {once}");
+        assert_eq!(once.matches(CLAUDE_GUIDE_BEGIN).count(), 1);
+        // Running again changes nothing.
+        let twice = upsert_claude_guide(&once, CLAUDE_GUIDE);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn claude_guide_creates_from_empty() {
+        let out = upsert_claude_guide("", CLAUDE_GUIDE);
+        assert!(out.contains("yoink — headless code search"));
+        assert!(out.ends_with('\n'));
     }
 
     #[test]
