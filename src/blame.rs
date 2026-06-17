@@ -102,7 +102,10 @@ pub fn blame_for_line_cached(cwd: &Path, file: &Path, line: usize) -> Option<Lin
         let _ = fs::create_dir_all(&cache_dir);
         let mut body = String::new();
         for (l, b) in &map {
-            body.push_str(&format!("{}\t{}\t{}\t{}\n", l, b.timestamp, b.sha, b.author));
+            body.push_str(&format!(
+                "{}\t{}\t{}\t{}\n",
+                l, b.timestamp, b.sha, b.author
+            ));
         }
         let _ = fs::write(&cache_file, body);
     }
@@ -184,10 +187,7 @@ fn blame_one_line(cwd: &Path, file: &Path, line: usize) -> Option<LineBlame> {
             timestamp = rest.split_whitespace().next().and_then(|v| v.parse().ok());
             continue;
         }
-        if sha.is_empty()
-            && raw.len() >= 40
-            && raw[..40].chars().all(|c| c.is_ascii_hexdigit())
-        {
+        if sha.is_empty() && raw.len() >= 40 && raw[..40].chars().all(|c| c.is_ascii_hexdigit()) {
             sha = raw[..40].to_string();
         }
     }

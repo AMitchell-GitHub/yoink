@@ -148,7 +148,8 @@ fn applies_configured_ignore_globs() {
         fs::create_dir(root.join(".git")).expect("mkdir git");
         fs::write(root.join(".git/ignored.txt"), "ejectReasons\n").expect("write git ignored");
         fs::create_dir(root.join("node_modules")).expect("mkdir node_modules");
-        fs::write(root.join("node_modules/ignored.txt"), "ejectReasons\n").expect("write node_modules ignored");
+        fs::write(root.join("node_modules/ignored.txt"), "ejectReasons\n")
+            .expect("write node_modules ignored");
         fs::write(root.join("kept.txt"), "ejectReasons\n").expect("write kept");
 
         let candidates = build_candidates("ejectReasons", root).expect("build candidates");

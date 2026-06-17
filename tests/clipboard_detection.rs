@@ -50,12 +50,22 @@ fn wayland_wins_over_xclip() {
     let path_val = format!("{}:{}", dir.display(), system_path);
 
     let output = run_copy_with_env(&path_val, Some(":0"), "relative", "src/foo.rs", "");
-    assert!(output.status.success(), "expected exit 0, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "expected exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let wl_content = fs::read_to_string(&wl_captured).expect("wl-copy.captured should exist");
-    assert!(wl_content.contains("src/foo.rs"), "wl-copy should have received src/foo.rs, got: {wl_content:?}");
+    assert!(
+        wl_content.contains("src/foo.rs"),
+        "wl-copy should have received src/foo.rs, got: {wl_content:?}"
+    );
 
-    assert!(!xclip_captured.exists(), "xclip.captured should NOT exist when wl-copy is preferred");
+    assert!(
+        !xclip_captured.exists(),
+        "xclip.captured should NOT exist when wl-copy is preferred"
+    );
 }
 
 #[test]
@@ -68,10 +78,17 @@ fn xclip_used_when_no_wayland() {
     let path_val = format!("{}:{}", dir.display(), system_path);
 
     let output = run_copy_with_env(&path_val, None, "relative", "src/foo.rs", "");
-    assert!(output.status.success(), "expected exit 0, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "expected exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let xclip_content = fs::read_to_string(&xclip_captured).expect("xclip.captured should exist");
-    assert!(xclip_content.contains("src/foo.rs"), "xclip should have received src/foo.rs, got: {xclip_content:?}");
+    assert!(
+        xclip_content.contains("src/foo.rs"),
+        "xclip should have received src/foo.rs, got: {xclip_content:?}"
+    );
 }
 
 #[test]
@@ -83,10 +100,17 @@ fn xsel_fallback_when_no_xclip() {
     let tempdir_str = dir.to_str().unwrap();
 
     let output = run_copy_with_env(tempdir_str, None, "relative", "src/foo.rs", "");
-    assert!(output.status.success(), "expected exit 0, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "expected exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let xsel_content = fs::read_to_string(&xsel_captured).expect("xsel.captured should exist");
-    assert!(xsel_content.contains("src/foo.rs"), "xsel should have received src/foo.rs, got: {xsel_content:?}");
+    assert!(
+        xsel_content.contains("src/foo.rs"),
+        "xsel should have received src/foo.rs, got: {xsel_content:?}"
+    );
 }
 
 #[test]
@@ -96,8 +120,15 @@ fn error_when_no_clipboard_tools_available() {
     let tempdir_str = dir.to_str().unwrap();
 
     let output = run_copy_with_env(tempdir_str, None, "relative", "src/foo.rs", "");
-    assert_eq!(output.status.code(), Some(0), "expected exit code 0 (non-fatal error)");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "expected exit code 0 (non-fatal error)"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("no clipboard tool found"), "expected 'no clipboard tool found' in stderr, got: {stderr:?}");
+    assert!(
+        stderr.contains("no clipboard tool found"),
+        "expected 'no clipboard tool found' in stderr, got: {stderr:?}"
+    );
 }

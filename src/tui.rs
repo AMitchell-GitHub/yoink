@@ -29,7 +29,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 use ratatui::{Frame, Terminal};
 use std::io::{stderr, Stderr, Write};
 use std::path::{Path, PathBuf};
@@ -104,7 +106,12 @@ fn leave_tui(terminal: &mut Tui) -> Result<()> {
     // callers should rely on the Drop path so the restore happens on error
     // paths too.
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .ok();
     terminal.show_cursor().ok();
     Ok(())
 }
@@ -116,10 +123,20 @@ where
     F: FnOnce() -> T,
 {
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )
+    .ok();
     let result = f();
     enable_raw_mode().ok();
-    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture).ok();
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )
+    .ok();
     terminal.clear().ok();
     Ok(result)
 }
@@ -166,14 +183,8 @@ enum SearchProgress {
 
 #[derive(Debug, Clone)]
 enum PreviewProgress {
-    Done {
-        key: PreviewKey,
-        body: String,
-    },
-    Failed {
-        key: PreviewKey,
-        message: String,
-    },
+    Done { key: PreviewKey, body: String },
+    Failed { key: PreviewKey, message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -234,9 +245,7 @@ impl SettingsDraft {
     }
 
     fn dirty(&self) -> bool {
-        self.mode != self.saved_mode
-            || self.case != self.saved_case
-            || self.sort != self.saved_sort
+        self.mode != self.saved_mode || self.case != self.saved_case || self.sort != self.saved_sort
     }
 }
 
@@ -590,7 +599,10 @@ impl App {
         // Query input.
         match key.code {
             KeyCode::Char(ch) => {
-                if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
                     // A Ctrl/Alt chord that reached here matched no configured
                     // bind. Swallow it so control chars never leak into the
                     // query. (Query editing — clear/delete-word/etc. — is a
@@ -950,7 +962,10 @@ impl App {
         while idx > 0 && !chars[idx - 1].is_whitespace() {
             idx -= 1;
         }
-        let new_query: String = chars[..idx].iter().chain(chars[self.cursor..].iter()).collect();
+        let new_query: String = chars[..idx]
+            .iter()
+            .chain(chars[self.cursor..].iter())
+            .collect();
         self.query = new_query;
         self.cursor = idx;
     }
@@ -1210,7 +1225,12 @@ impl App {
     fn draw_title(&self, frame: &mut Frame<'_>, area: Rect) {
         let cwd = self.cwd.display().to_string();
         let title = Line::from(vec![
-            Span::styled("yoink", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "yoink",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled(cwd, Style::default().fg(Color::DarkGray)),
         ]);
@@ -1219,8 +1239,12 @@ impl App {
 
     fn draw_query(&self, frame: &mut Frame<'_>, area: Rect) {
         let prompt = render_prompt_for(&self.settings);
-        let prompt_span =
-            Span::styled(prompt.clone(), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        let prompt_span = Span::styled(
+            prompt.clone(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
         let query_span = Span::raw(self.query.clone());
         let line = Line::from(vec![prompt_span, query_span]);
         let block = Block::default()
@@ -1234,7 +1258,11 @@ impl App {
             .title(Line::from(vec![
                 Span::raw(" "),
                 Span::styled(
-                    if self.searching { "searching…" } else { "query" },
+                    if self.searching {
+                        "searching…"
+                    } else {
+                        "query"
+                    },
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::raw(" "),
@@ -1319,7 +1347,10 @@ impl App {
                     )]),
                 ])
             };
-            frame.render_widget(Paragraph::new(msg).block(block).wrap(Wrap { trim: false }), area);
+            frame.render_widget(
+                Paragraph::new(msg).block(block).wrap(Wrap { trim: false }),
+                area,
+            );
             return;
         }
 
@@ -1354,27 +1385,39 @@ impl App {
             .title(title);
 
         let body = if self.preview.is_none() {
-            Text::from(vec![Line::from(""),
+            Text::from(vec![
+                Line::from(""),
                 Line::from(vec![Span::styled(
                     "  no selection",
                     Style::default().fg(Color::DarkGray),
-                )])])
+                )]),
+            ])
         } else if self.preview_loading {
-            Text::from(vec![Line::from(""),
+            Text::from(vec![
+                Line::from(""),
                 Line::from(vec![Span::styled(
                     "  loading…",
                     Style::default().fg(Color::DarkGray),
-                )])])
+                )]),
+            ])
         } else {
             self.preview_body.clone().unwrap_or_default()
         };
 
-        frame.render_widget(Paragraph::new(body).block(block).wrap(Wrap { trim: false }), area);
+        frame.render_widget(
+            Paragraph::new(body).block(block).wrap(Wrap { trim: false }),
+            area,
+        );
     }
 
     fn draw_hint(&self, frame: &mut Frame<'_>, area: Rect) {
         let mut bits: Vec<Span> = Vec::new();
-        bits.push(Span::styled(" Enter ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)));
+        bits.push(Span::styled(
+            " Enter ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
         bits.push(Span::styled("search", Style::default().fg(Color::DarkGray)));
         bits.push(Span::raw("  "));
         bits.push(Span::styled("↑↓ ", Style::default().fg(Color::DarkGray)));
@@ -1389,18 +1432,39 @@ impl App {
             ),
             Style::default().fg(Color::Magenta),
         ));
-        bits.push(Span::styled("mode/case/sort menu", Style::default().fg(Color::DarkGray)));
+        bits.push(Span::styled(
+            "mode/case/sort menu",
+            Style::default().fg(Color::DarkGray),
+        ));
         bits.push(Span::raw("  "));
-        bits.push(Span::styled(format!("{} ", builtin::SETTINGS.label), Style::default().fg(Color::Yellow)));
-        bits.push(Span::styled("settings", Style::default().fg(Color::DarkGray)));
+        bits.push(Span::styled(
+            format!("{} ", builtin::SETTINGS.label),
+            Style::default().fg(Color::Yellow),
+        ));
+        bits.push(Span::styled(
+            "settings",
+            Style::default().fg(Color::DarkGray),
+        ));
         bits.push(Span::raw("  "));
-        bits.push(Span::styled(format!("{} ", builtin::HELP.label), Style::default().fg(Color::Yellow)));
-        bits.push(Span::styled("all binds", Style::default().fg(Color::DarkGray)));
+        bits.push(Span::styled(
+            format!("{} ", builtin::HELP.label),
+            Style::default().fg(Color::Yellow),
+        ));
+        bits.push(Span::styled(
+            "all binds",
+            Style::default().fg(Color::DarkGray),
+        ));
         bits.push(Span::raw("  "));
         // First two configured open-action binds as inline hints.
         for (k, a) in self.settings.binds.iter().take(3) {
-            bits.push(Span::styled(format!("{k} ", k = k), Style::default().fg(Color::Cyan)));
-            bits.push(Span::styled(a.label().to_string(), Style::default().fg(Color::DarkGray)));
+            bits.push(Span::styled(
+                format!("{k} ", k = k),
+                Style::default().fg(Color::Cyan),
+            ));
+            bits.push(Span::styled(
+                a.label().to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
             bits.push(Span::raw("  "));
         }
         frame.render_widget(Paragraph::new(Line::from(bits)), area);
@@ -1472,7 +1536,9 @@ impl App {
                     "  {} keybind conflict(s) in your config:",
                     self.startup_warnings.len()
                 ),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             )]),
             Line::from(""),
         ];
@@ -1507,7 +1573,9 @@ impl App {
             .border_style(Style::default().fg(Color::Yellow))
             .title(Line::from(" ⚠ keybind conflicts "));
         frame.render_widget(
-            Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
             popup,
         );
     }
@@ -1519,7 +1587,9 @@ impl App {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::from(vec![Span::styled(
             "yoink — key bindings",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )]));
         lines.push(Line::from(""));
         lines.push(help_row("Enter", "run the search"));
@@ -1594,7 +1664,9 @@ impl App {
             .border_style(Style::default().fg(Color::Yellow))
             .title(Line::from(" help "));
         frame.render_widget(
-            Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
             popup,
         );
     }
@@ -1613,7 +1685,12 @@ impl App {
 
         let x = area.x + area.width.saturating_sub(width) / 2;
         let y = area.y + area.height.saturating_sub(height) / 2;
-        let popup = Rect { x, y, width, height };
+        let popup = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
         frame.render_widget(Clear, popup);
 
         let mut lines: Vec<Line> = Vec::new();
@@ -1650,12 +1727,16 @@ impl App {
                 Span::raw(" "),
                 Span::styled(
                     kind.title(),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
             ]));
         frame.render_widget(
-            Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
             popup,
         );
     }
@@ -1670,7 +1751,11 @@ impl App {
             SearchMode::Glob => "glob",
             SearchMode::Regex => "regex",
         };
-        let case_label = if draft.case { "sensitive" } else { "insensitive" };
+        let case_label = if draft.case {
+            "sensitive"
+        } else {
+            "insensitive"
+        };
         let sort_label = match draft.sort {
             Sort::Depth => "depth",
             Sort::Alphabetical => "alphabetical",
@@ -1686,7 +1771,9 @@ impl App {
                 Span::styled("‹ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     value.to_string(),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" ›", Style::default().fg(Color::DarkGray)),
             ])
@@ -1697,7 +1784,9 @@ impl App {
             let line = match row {
                 SettingsRow::Header => Line::from(vec![Span::styled(
                     "Default settings for new sessions:",
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 )]),
                 SettingsRow::Mode => value_row("search mode", mode_label),
                 SettingsRow::Case => value_row("sensitivity", case_label),
@@ -1708,7 +1797,9 @@ impl App {
                             Span::raw("    "),
                             Span::styled(
                                 "Save",
-                                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
                                 "   (write defaults to config)",
@@ -1720,10 +1811,7 @@ impl App {
                         Line::from(vec![
                             Span::raw("    "),
                             Span::styled("Save", Style::default().fg(Color::DarkGray)),
-                            Span::styled(
-                                "   (no changes)",
-                                Style::default().fg(Color::DarkGray),
-                            ),
+                            Span::styled("   (no changes)", Style::default().fg(Color::DarkGray)),
                         ])
                     }
                 }
@@ -1744,7 +1832,10 @@ impl App {
         }
 
         let mut state = ListState::default();
-        state.select(Some(self.settings_cursor.min(SETTINGS_ROWS.len().saturating_sub(1))));
+        state.select(Some(
+            self.settings_cursor
+                .min(SETTINGS_ROWS.len().saturating_sub(1)),
+        ));
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
@@ -1775,7 +1866,12 @@ impl App {
         frame.render_widget(Clear, popup);
         let line = Line::from(vec![
             Span::raw(" "),
-            Span::styled(msg.to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                msg.to_string(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
         ]);
         frame.render_widget(Paragraph::new(line), popup);
@@ -1793,7 +1889,11 @@ impl App {
         frame.render_widget(Clear, popup);
         let bar_width = popup.width.saturating_sub(8) as usize;
         let pct = if total == 0 { 0 } else { (done * 100) / total };
-        let filled = if total == 0 { 0 } else { (done * bar_width) / total };
+        let filled = if total == 0 {
+            0
+        } else {
+            (done * bar_width) / total
+        };
         let mut bar = String::with_capacity(bar_width);
         for i in 0..bar_width {
             bar.push(if i < filled { '█' } else { '░' });
@@ -1804,7 +1904,9 @@ impl App {
                 Span::raw("  "),
                 Span::styled(
                     "⏳ pre-warming git blame cache…",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(""),
@@ -1827,7 +1929,9 @@ impl App {
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(Color::Yellow));
         frame.render_widget(
-            Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
             popup,
         );
     }
@@ -1838,7 +1942,9 @@ fn help_row(key: &str, desc: &str) -> Line<'static> {
         Span::raw("  "),
         Span::styled(
             format!("{key:<22}"),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(desc.to_string(), Style::default().fg(Color::White).dim()),
@@ -1981,7 +2087,6 @@ fn show_in_pager(body: &str, terminal: &mut Tui) -> Result<()> {
     Ok(())
 }
 
-
 fn render_prompt_for(settings: &YoinkSettings) -> String {
     let sort = match settings.sort {
         Sort::Depth => "",
@@ -2095,7 +2200,9 @@ fn render_preview(cwd: &Path, key: &PreviewKey) -> Result<String> {
     }
 
     let mut bat = Command::new("bat");
-    bat.arg("--style=numbers").arg("--color=always").arg("--paging=never");
+    bat.arg("--style=numbers")
+        .arg("--color=always")
+        .arg("--paging=never");
     if let Some(line) = key.line {
         let ctx = 30usize;
         let start = if line > ctx { line - ctx } else { 1 };

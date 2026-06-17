@@ -113,8 +113,7 @@ pub fn cd_target(cwd: &Path, selected_rel_path: &str) -> PathBuf {
 /// refuses to run with "Output is not to a terminal". We open `/dev/tty`
 /// directly and hand the child its own tty triplet for stdin/stdout/stderr.
 pub fn open_in_editor(editor_cmd: &str, cwd: &Path, selected_rel_path: &str) -> Result<()> {
-    which(editor_cmd)
-        .with_context(|| format!("editor command not found in PATH: {editor_cmd}"))?;
+    which(editor_cmd).with_context(|| format!("editor command not found in PATH: {editor_cmd}"))?;
 
     let full = cwd.join(selected_rel_path);
 
@@ -194,7 +193,5 @@ fn detect_clipboard() -> Result<(&'static str, &'static [&'static str])> {
     if which("xsel").is_ok() {
         return Ok(("xsel", &["--clipboard", "--input"]));
     }
-    anyhow::bail!(
-        "no clipboard tool found; install xclip or xsel (X11) or wl-clipboard (Wayland)"
-    )
+    anyhow::bail!("no clipboard tool found; install xclip or xsel (X11) or wl-clipboard (Wayland)")
 }

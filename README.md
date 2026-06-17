@@ -67,6 +67,68 @@ term1.*term2                  → multi-term; matches: "...term1...term2..."
 (term1|term2).*(term1|term2)  → disordered multi-term
 ```
 
+## Headless mode (scripting & LLMs)
+
+Pass `--output/-o` and yoink skips the TUI entirely: it runs one search and
+prints structured results to stdout. This is built for piping into other
+programs — a shell script, `jq`, or an LLM — and as a way to export results to
+paste somewhere else. (`yoink --help` prints this whole reference plus examples.)
+
+```bash
+yoink 'my.*search.*terms' -o json -m regex -s blame_young -C 10
+yoink ejectReasons -o json               # glob (default), JSON output
+yoink 'TODO' -o markdown > findings.md   # paste-ready export
+```
+
+Each content match carries the file path, line, column, the matched line, and
+`-C/--context` lines of surrounding code on each side (default 10). With a
+blame sort — or `--blame` — every result also gets its commit date, author, and
+sha.
+
+### Flags
+
+| Flag | Values | Notes |
+|------|--------|-------|
+| `-o, --output` | `json` · `jsonl` · `markdown` · `text` | Triggers headless mode. |
+| `-q, --query` | string | Query as a flag; use it when the query starts with `-`. |
+| `-m, --mode` | `glob` · `regex` | Overrides the config search mode for this run. |
+| `-s, --sort` | `depth` · `alphabetical` · `blame_young` · `blame_old` | Overrides the config sort. |
+| `--case` | `sensitive` · `insensitive` | Overrides config case sensitivity. |
+| `-C, --context` | N (default 10) | Lines of code each side of a content match. |
+| `--max-results` | N | Caps results after sorting; envelope reports `truncated`. |
+| `--blame` | — | Force blame info on for non-blame sorts too. |
+| `--content-only` | — | Skip files/dirs that matched by name only. |
+
+`-o`/`-s`/`-m`/`--case` only override the active session — your `~/.yoink-config`
+is never modified.
+
+### Quoting the query
+
+There's no special delimiter — let your **shell** carry the query through, just
+like `rg` or `grep`. Wrap it in **single quotes** so spaces, `"`, `$`, and regex
+metacharacters arrive intact:
+
+```bash
+yoink 'fn main(' -o json -m regex          # spaces & parens
+yoink 'name = "yoink"' -o text -m regex     # literal double-quotes
+yoink -q '-C' -m regex -o json              # query starting with '-'
+```
+
+For a query that begins with `-`, use `-q/--query` (shown above) or put it after
+a `--` separator: `yoink -o json -- '-C'`.
+
+### Output formats
+
+- **`json`** — one object: query metadata (`mode`, `sort`, `case`, `root`,
+  `count`, `total_matches`, `truncated`) plus a `results` array. Each result:
+  `kind` (`content` or `path`), `path`, `is_dir`, `line`, `column`, `match`,
+  `context_before`, `context_after`, `context_start_line`, and `blame`.
+- **`jsonl`** — one result object per line, no envelope. Stream-friendly and
+  easy to `grep`/`jq -c`.
+- **`markdown`** — a heading per match with a fenced, line-numbered excerpt (the
+  match line marked with `>`). Paste-ready.
+- **`text`** — grep-style `path:line: match` with `path-line-` context lines.
+
 ## Keybinds
 
 Always available, no menu required:

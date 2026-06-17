@@ -259,8 +259,7 @@ fn blame_for_line_cached_returns_per_line_data() {
     let root = dir.path();
     make_repo(root);
 
-    let info = blame_for_line_cached(root, Path::new("hello.txt"), 1)
-        .expect("line 1 should blame");
+    let info = blame_for_line_cached(root, Path::new("hello.txt"), 1).expect("line 1 should blame");
     assert_eq!(info.author, "Test Author");
     assert!(!info.sha.is_empty());
     assert!(info.timestamp > 0);
@@ -315,8 +314,7 @@ fn blame_for_line_cached_merges_into_existing_cache() {
     let _ = blame_for_line_cached(root, Path::new("hello.txt"), 1);
     let _ = blame_for_line_cached(root, Path::new("hello.txt"), 2);
 
-    let cached = try_blame_from_cache(root, Path::new("hello.txt"))
-        .expect("cache populated");
+    let cached = try_blame_from_cache(root, Path::new("hello.txt")).expect("cache populated");
     assert!(cached.contains_key(&1), "line 1 preserved");
     assert!(cached.contains_key(&2), "line 2 added");
 }
@@ -332,8 +330,7 @@ fn file_last_touched_returns_timestamp_and_author() {
     let root = dir.path();
     make_repo(root);
 
-    let (ts, author) =
-        file_last_touched(root, Path::new("hello.txt")).expect("file has commits");
+    let (ts, author) = file_last_touched(root, Path::new("hello.txt")).expect("file has commits");
     assert!(ts > 0);
     assert_eq!(author, "Test Author");
 }

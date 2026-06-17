@@ -1,6 +1,7 @@
 mod actions;
 mod blame;
 mod cli;
+mod headless;
 mod keys;
 mod search;
 mod settings;
@@ -9,6 +10,7 @@ mod tui;
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, InternalCommand};
+use headless::{run_headless, HeadlessOptions};
 use search::run_search_streaming;
 use std::env;
 use which::which;
@@ -50,10 +52,35 @@ fn run() -> Result<()> {
         None => {}
     }
 
+    // Headless mode: `--output <fmt>` prints a one-shot result set and never
+    // launches the TUI. `bat` isn't needed here (no live preview), only `rg`.
+    if let Some(format) = cli.output {
+        ensure_dependency("rg")?;
+        let query = cli
+            .query_flag
+            .clone()
+            .or_else(|| cli.query.clone())
+            .unwrap_or_default();
+        let options = HeadlessOptions {
+            query,
+            format,
+            mode: cli.mode.map(|mode| mode.to_mode()),
+            sort: cli.sort.map(|sort| sort.to_sort()),
+            case_sensitive: cli.case.map(|case| case.is_sensitive()),
+            context: cli.context,
+            max_results: cli.max_results,
+            blame: cli.blame,
+            content_only: cli.content_only,
+        };
+        run_headless(options, &cwd)?;
+        return Ok(());
+    }
+
     ensure_dependency("rg")?;
     ensure_dependency("bat")?;
 
-    tui::run_session(cli.query.as_deref(), &cwd)?;
+    let query = cli.query_flag.as_deref().or(cli.query.as_deref());
+    tui::run_session(query, &cwd)?;
 
     Ok(())
 }

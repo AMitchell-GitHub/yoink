@@ -53,7 +53,11 @@ fn clipboard_command_exits_nonzero() {
     let system_path = std::env::var("PATH").unwrap_or_default();
     let path_val = format!("{}:{}", dir.path().display(), system_path);
     let output = run_copy(&path_val, None, "relative", "src/foo.rs", "");
-    assert!(output.status.success(), "expected exit code 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "expected exit code 0, got {:?}",
+        output.status
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("yoink copy error:"),
@@ -71,7 +75,11 @@ fn wayland_set_but_wl_copy_absent_falls_through_to_xclip() {
     // so detect_clipboard falls through to the fake xclip.
     let path_val = dir.path().to_str().unwrap().to_string();
     let output = run_copy(&path_val, Some(":0"), "relative", "src/foo.rs", "");
-    assert!(output.status.success(), "expected exit code 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "expected exit code 0, got {:?}",
+        output.status
+    );
     let content = fs::read_to_string(&captured).unwrap();
     assert!(
         content.contains("src/foo.rs"),
@@ -89,7 +97,11 @@ fn wayland_display_empty_string_falls_through_to_xclip() {
     let path_val = dir.path().to_str().unwrap().to_string();
     // Explicitly set WAYLAND_DISPLAY to empty string — var_os returns Some("") so is_some() is true
     let output = run_copy(&path_val, Some(""), "relative", "src/foo.rs", "");
-    assert!(output.status.success(), "expected exit code 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "expected exit code 0, got {:?}",
+        output.status
+    );
     let content = fs::read_to_string(&captured).unwrap();
     assert!(
         content.contains("src/foo.rs"),
@@ -104,7 +116,11 @@ fn all_tools_absent_prints_error_exits_zero() {
     // PATH is only the empty temp dir — no real tools visible
     let path_val = dir.path().to_str().unwrap().to_string();
     let output = run_copy(&path_val, None, "relative", "src/foo.rs", "");
-    assert!(output.status.success(), "expected exit code 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "expected exit code 0, got {:?}",
+        output.status
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("no clipboard tool found"),
@@ -120,7 +136,11 @@ fn clipboard_command_exits_nonzero_shows_error() {
     // Only temp dir in PATH so only xsel is found (no xclip, no wl-copy)
     let path_val = dir.path().to_str().unwrap().to_string();
     let output = run_copy(&path_val, None, "relative", "src/foo.rs", "");
-    assert!(output.status.success(), "expected exit code 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "expected exit code 0, got {:?}",
+        output.status
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("yoink copy error:"),
@@ -155,7 +175,11 @@ fn empty_path_copies_empty_string() {
     let system_path = std::env::var("PATH").unwrap_or_default();
     let path_val = format!("{}:{}", dir.path().display(), system_path);
     let output = run_copy(&path_val, None, "relative", "", "");
-    assert!(output.status.success(), "expected exit code 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "expected exit code 0, got {:?}",
+        output.status
+    );
     assert!(
         captured.exists(),
         "expected xclip.captured to exist (clipboard was invoked)"
@@ -172,7 +196,11 @@ fn unrecognised_mode_copies_path_as_is() {
     let system_path = std::env::var("PATH").unwrap_or_default();
     let path_val = format!("{}:{}", dir.path().display(), system_path);
     let output = run_copy(&path_val, None, "absolute", "src/foo.rs", "");
-    assert!(output.status.success(), "expected exit code 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "expected exit code 0, got {:?}",
+        output.status
+    );
     let content = fs::read_to_string(&captured).unwrap();
     assert!(
         content.contains("src/foo.rs"),
@@ -188,7 +216,11 @@ fn non_numeric_line_string_appended_literally() {
     let system_path = std::env::var("PATH").unwrap_or_default();
     let path_val = format!("{}:{}", dir.path().display(), system_path);
     let output = run_copy(&path_val, None, "relative", "src/foo.rs", "abc");
-    assert!(output.status.success(), "expected exit code 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "expected exit code 0, got {:?}",
+        output.status
+    );
     let content = fs::read_to_string(&captured).unwrap();
     assert_eq!(
         content, "src/foo.rs:abc",
@@ -205,7 +237,11 @@ fn path_with_shell_metacharacters_passed_as_literal() {
     let path_val = format!("{}:{}", dir.path().display(), system_path);
     // Command::new does not use a shell, so $() is never interpreted
     let output = run_copy(&path_val, None, "relative", "src/foo$(bar).rs", "");
-    assert!(output.status.success(), "expected exit code 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "expected exit code 0, got {:?}",
+        output.status
+    );
     let content = fs::read_to_string(&captured).unwrap();
     assert_eq!(
         content, "src/foo$(bar).rs",

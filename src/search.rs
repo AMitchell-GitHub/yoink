@@ -111,10 +111,10 @@ pub struct SearchEntry {
 }
 
 #[derive(Debug, Clone)]
-struct Occurrence {
-    line: usize,
-    column: usize,
-    snippet: String,
+pub struct Occurrence {
+    pub line: usize,
+    pub column: usize,
+    pub snippet: String,
 }
 
 fn is_hidden_path(rel: &Path) -> bool {
@@ -263,10 +263,7 @@ pub fn load_settings() -> Result<YoinkSettings> {
 
     let mut builder = GlobSetBuilder::new();
     for pattern in &globs {
-        builder.add(
-            Glob::new(pattern)
-                .with_context(|| format!("invalid ignore glob: {pattern}"))?,
-        );
+        builder.add(Glob::new(pattern).with_context(|| format!("invalid ignore glob: {pattern}"))?);
     }
 
     let globset = builder.build().context("failed building ignore glob set")?;
@@ -291,11 +288,7 @@ pub fn load_settings() -> Result<YoinkSettings> {
 /// substring-style, like the rest of the pipeline). Case-insensitivity is
 /// applied with a `(?i)` prefix so a single string carries the flag through
 /// to both `regex::Regex` and `rg`.
-pub fn effective_pattern(
-    query: &str,
-    mode: SearchMode,
-    case_sensitive: bool,
-) -> Result<String> {
+pub fn effective_pattern(query: &str, mode: SearchMode, case_sensitive: bool) -> Result<String> {
     if query.is_empty() {
         return Ok(String::new());
     }
@@ -454,10 +447,7 @@ pub fn build_candidates(query: &str, cwd: &Path) -> Result<Vec<Candidate>> {
     let pattern_re = if effective.is_empty() {
         None
     } else {
-        Some(
-            Regex::new(&effective)
-                .with_context(|| format!("invalid regex query: {effective}"))?,
-        )
+        Some(Regex::new(&effective).with_context(|| format!("invalid regex query: {effective}"))?)
     };
     let mut map = walk_path_candidates(pattern_re.as_ref(), cwd, &settings)?;
 
@@ -555,10 +545,7 @@ pub fn build_search_entries(
     let walk_pattern = if effective.is_empty() {
         None
     } else {
-        Some(
-            Regex::new(&effective)
-                .with_context(|| format!("invalid regex query: {effective}"))?,
-        )
+        Some(Regex::new(&effective).with_context(|| format!("invalid regex query: {effective}"))?)
     };
     let mut candidate_map = walk_path_candidates(walk_pattern.as_ref(), cwd, settings)?;
 
@@ -592,15 +579,16 @@ pub fn build_search_entries(
     let mut entries = Vec::new();
 
     for candidate in candidates {
-        let occurrences = occurrence_map.get(&candidate.path).cloned().unwrap_or_default();
+        let occurrences = occurrence_map
+            .get(&candidate.path)
+            .cloned()
+            .unwrap_or_default();
         let count = occurrences.len();
 
         if candidate.path_match || count > 0 {
             let icon = if candidate.is_dir { "📁" } else { "📄" };
-            let path_display = highlight_query_matches(
-                &candidate.path.to_string_lossy(),
-                highlight_re.as_ref(),
-            );
+            let path_display =
+                highlight_query_matches(&candidate.path.to_string_lossy(), highlight_re.as_ref());
 
             entries.push(SearchEntry {
                 display: format!("{} {}", icon, path_display),
@@ -822,7 +810,36 @@ pub fn collect_rg_grouped_public(
         .collect())
 }
 
-fn collect_rg_grouped(
+/// Collect files and directories whose *name or path* matches the query, with
+/// no regard to file contents. Returns `(relative_path, is_dir)` pairs sorted
+/// by path. Used by the headless CLI to surface name-only hits alongside the
+/// content matches from `collect_rg_grouped`.
+pub fn collect_path_matches(
+    query: &str,
+    cwd: &Path,
+    settings: &YoinkSettings,
+) -> Result<Vec<(PathBuf, bool)>> {
+    let effective = effective_pattern(query, settings.search_mode, settings.case_sensitive)?;
+    if effective.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pattern_re =
+        Regex::new(&effective).with_context(|| format!("invalid regex query: {effective}"))?;
+    let map = walk_path_candidates(Some(&pattern_re), cwd, settings)?;
+    let mut out: Vec<(PathBuf, bool)> = map
+        .into_values()
+        .filter(|candidate| candidate.path_match)
+        .map(|candidate| (candidate.path, candidate.is_dir))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// Run `rg` for content matches and return them grouped per file, in the
+/// order `rg` first emitted each file. Each `Occurrence` carries the 1-indexed
+/// line, column, and a trimmed snippet. Public so the headless CLI can build
+/// structured (JSON/markdown/text) output from the same matcher the TUI uses.
+pub fn collect_rg_grouped(
     pattern: &str,
     cwd: &Path,
     settings: &YoinkSettings,
@@ -858,8 +875,12 @@ fn collect_rg_grouped(
         }
         let mut parts = raw.splitn(4, ':');
         let path_str = parts.next().unwrap_or("");
-        let Some(line_str) = parts.next() else { continue };
-        let Some(col_str) = parts.next() else { continue };
+        let Some(line_str) = parts.next() else {
+            continue;
+        };
+        let Some(col_str) = parts.next() else {
+            continue;
+        };
         let snippet = parts.next().unwrap_or_default();
         let Ok(line) = line_str.parse::<usize>() else {
             continue;
