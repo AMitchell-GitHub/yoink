@@ -1,4 +1,4 @@
-<img width="2717" height="1389" alt="image" src="https://github.com/user-attachments/assets/bc951854-50cb-48b6-be5b-17b86f315f1c" />
+<img width="1962" height="1054" alt="image" src="https://github.com/user-attachments/assets/23ba01a8-63cd-4550-8e37-06e8b5296adb" />
 
 # yoink ![GitHub all releases](https://img.shields.io/github/downloads/AMItchell-GitHub/yoink/total)
 
