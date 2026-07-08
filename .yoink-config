@@ -46,6 +46,36 @@ sort = depth
 update_check = true
 
 
+# ─── search scope ──────────────────────────────────────────────────────────────
+# What a normal (Enter) search covers. Inside yoink, F6 opens a menu that
+# toggles these for the CURRENT SESSION; edit here (or F2 → Save) for the
+# persistent default. Default is the working tree only — the fast, familiar
+# search. Turn on a branch source and a search also greps other git refs with
+# `git grep <ref>` (nothing is checked out).
+
+# Search the files on disk (your current checkout).
+scope_working_tree = true
+
+# Also search local branches (refs/heads).
+scope_local_branches = false
+
+# Also search remote-tracking branches (refs/remotes, e.g. origin/*).
+scope_remote_branches = false
+
+# When a branch source is on, only search refs whose name matches this glob,
+# matched as a substring so `jb/*` also catches `origin/jb/*`. Examples:
+# `jb/*`, `*redesign*`. Empty = every ref.
+branch_filter =
+
+# ...and only refs updated within this window. Units: h(ours) d(ays) w(eeks)
+# y(ears) — e.g. 360h, 14d, 3w, 1y. A bare number means days. Empty = no limit.
+branch_timeframe =
+
+# Run `git fetch --all` before searching remote branches (needs network).
+# Only fires when remote branches are enabled, so it's on by default.
+branch_fetch = true
+
+
 # ─── walking ─────────────────────────────────────────────────────────────────
 # What yoink does and doesn't descend into during a search. These mirror
 # the equivalent ripgrep flags.
@@ -84,6 +114,7 @@ node_modules/**
 #   F3                       search-mode picker (session)
 #   F4                       case picker (session)
 #   F5                       sort picker (session)
+#   F6                       search-scope menu (working tree / branches)
 #   Ctrl-C                   quit
 # (`?` is NOT built-in, so it reaches the query — glob wildcard / regex `(?i)`.)
 #

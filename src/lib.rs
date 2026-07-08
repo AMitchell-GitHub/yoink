@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod blame;
+pub mod branches;
 pub mod cli;
 pub mod headless;
 pub mod keys;

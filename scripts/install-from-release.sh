@@ -298,13 +298,14 @@ emit_yoink_block() {
 # not recommended -- your changes will likely be overwritten on the next yoink
 # update.
 # Behavior: in the interactive TUI this cd's into the selected result. For
-# -o/--output, --help/--version, or piped output, yoink runs directly so its
-# output reaches you untouched (otherwise the cd-capture would swallow it).
+# -o/--output, --branches/--ref (cross-branch search streams results), --help/
+# --version, or piped output, yoink runs directly so its output reaches you
+# untouched (otherwise the cd-capture would swallow it).
 yoink() {
   if [[ ! -t 1 ]]; then command yoink "$@"; return; fi
   local arg
   for arg in "$@"; do
-    case "$arg" in -o*|--output*|-h|--help|-V|--version) command yoink "$@"; return ;; esac
+    case "$arg" in -o*|--output*|--branches|--ref|--ref=*|-h|--help|-V|--version) command yoink "$@"; return ;; esac
   done
   local target
   target="$(command yoink "$@")" || return

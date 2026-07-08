@@ -194,6 +194,12 @@ pub mod builtin {
         label: "F5",
         desc: "pick sort (depth / alphabetical / blame_young / blame_old)",
     };
+    /// Open the search-scope picker (working tree / branches).
+    pub const SCOPE: Builtin = Builtin {
+        spec: "f6",
+        label: "F6",
+        desc: "search scope (working tree / branches)",
+    };
     /// Quit immediately, from anywhere.
     pub const QUIT: Builtin = Builtin {
         spec: "ctrl-c",

@@ -9,19 +9,24 @@
 //! way to export search results.
 
 use crate::blame::{
-    blame_for_file_cached, blame_sort_active, file_last_touched, format_unix_date,
+    blame_for_file_cached, blame_sort_active, file_last_touched, find_repo_root, format_unix_date,
     SESSION_CACHE_ENV,
+};
+use crate::branches::{
+    branches_containing, parse_timeframe, search_branches, BranchEvent, BranchHit,
+    BranchSearchOptions,
 };
 use crate::cli::OutputFormat;
 use crate::search::{
     collect_path_matches, collect_rg_grouped, effective_pattern, load_settings, SearchMode, Sort,
 };
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Everything the headless path needs, assembled from the parsed CLI in
 /// `main`. The `mode`/`sort`/`case_sensitive` overrides are `None` when the
@@ -36,6 +41,23 @@ pub struct HeadlessOptions {
     pub max_results: Option<usize>,
     pub blame: bool,
     pub content_only: bool,
+}
+
+/// Options for a headless cross-branch search (`--branches` / `--ref`),
+/// assembled from the parsed CLI. `mode`/`case_sensitive` are `None` when the
+/// user didn't pass the flag (config value is then used). `format` is `None`
+/// when no `-o` was given — the terminal-friendly grep-style text is streamed.
+pub struct BranchHeadlessOptions {
+    pub query: String,
+    pub format: Option<OutputFormat>,
+    pub mode: Option<SearchMode>,
+    pub case_sensitive: Option<bool>,
+    pub filter: Option<String>,
+    pub refs: Vec<String>,
+    pub since: Option<String>,
+    pub no_fetch: bool,
+    pub local_only: bool,
+    pub max_results: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,4 +625,233 @@ fn language_for(path: &Path) -> &'static str {
         "sql" => "sql",
         _ => "",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-branch search (--branches / --ref)
+// ---------------------------------------------------------------------------
+
+/// A single cross-branch hit, serialized to JSON / JSONL. Borrows the hit so
+/// building it is allocation-light. `committed` is the ref's committer date.
+#[derive(Serialize)]
+struct JsonBranchResult<'a> {
+    branch: &'a str,
+    path: String,
+    line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    committed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    committed_date: Option<String>,
+    content: &'a str,
+}
+
+impl<'a> JsonBranchResult<'a> {
+    fn from_hit(hit: &'a BranchHit) -> JsonBranchResult<'a> {
+        JsonBranchResult {
+            branch: &hit.reference,
+            path: hit.path.to_string_lossy().into_owned(),
+            line: hit.line,
+            committed: hit.committed_ts,
+            committed_date: hit.committed_ts.map(format_unix_date),
+            content: &hit.content,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonBranchEnvelope<'a> {
+    query: &'a str,
+    mode: &'static str,
+    case: &'static str,
+    root: String,
+    refs_searched: usize,
+    count: usize,
+    truncated: bool,
+    results: Vec<JsonBranchResult<'a>>,
+}
+
+/// grep-style, greppable one line per hit: `<ref>:<path>:<line>:<content>`.
+fn write_branch_text(out: &mut impl Write, hit: &BranchHit) -> io::Result<()> {
+    writeln!(
+        out,
+        "{}:{}:{}:{}",
+        hit.reference,
+        hit.path.display(),
+        hit.line,
+        hit.content
+    )?;
+    out.flush()
+}
+
+fn write_branch_jsonl(out: &mut impl Write, hit: &BranchHit) -> io::Result<()> {
+    if let Ok(line) = serde_json::to_string(&JsonBranchResult::from_hit(hit)) {
+        writeln!(out, "{line}")?;
+    }
+    out.flush()
+}
+
+fn write_branch_markdown(out: &mut impl Write, hit: &BranchHit) -> io::Result<()> {
+    writeln!(
+        out,
+        "## `{}` — {}:{}",
+        hit.reference,
+        hit.path.display(),
+        hit.line
+    )?;
+    if let Some(ts) = hit.committed_ts {
+        writeln!(out, "_{}_", format_unix_date(ts))?;
+    }
+    let lang = language_for(&hit.path);
+    writeln!(out, "```{lang}")?;
+    writeln!(out, "{}", hit.content)?;
+    writeln!(out, "```\n")?;
+    out.flush()
+}
+
+/// Run a one-shot cross-branch search. Hits stream to stdout in the requested
+/// format (grep-style text by default); progress goes to stderr so stdout stays
+/// clean for pipes. A closed downstream pipe (`| head`) ends the run cleanly.
+pub fn run_branch_search(opts: BranchHeadlessOptions, cwd: &Path) -> Result<()> {
+    if opts.query.trim().is_empty() {
+        bail!("a non-empty query is required for --branches (try: yoink 'pattern' --branches)");
+    }
+    let repo_root = find_repo_root(cwd).ok_or_else(|| {
+        anyhow!(
+            "not inside a git repository (no .git found from {})",
+            cwd.display()
+        )
+    })?;
+
+    let mut settings = load_settings()?;
+    if let Some(mode) = opts.mode {
+        settings.search_mode = mode;
+    }
+    if let Some(case_sensitive) = opts.case_sensitive {
+        settings.case_sensitive = case_sensitive;
+    }
+    let since = parse_timeframe(opts.since.as_deref().unwrap_or(""))?;
+
+    let format = opts.format;
+    let mode_token = settings.search_mode.token();
+    let case_tok = case_token(settings.case_sensitive);
+    let root_display = repo_root.to_string_lossy().into_owned();
+
+    let search_opts = BranchSearchOptions {
+        query: opts.query.clone(),
+        mode: settings.search_mode,
+        case_sensitive: settings.case_sensitive,
+        filter: opts.filter.clone(),
+        explicit_refs: opts.refs.clone(),
+        since,
+        include_local: true,
+        include_remotes: !opts.local_only,
+        fetch: !opts.no_fetch,
+        max_results: opts.max_results,
+    };
+
+    // Bonus for a bare commit target: note which branches contain it (stderr).
+    let hashy = |value: &str| {
+        let len = value.len();
+        (4..=40).contains(&len) && value.chars().all(|c| c.is_ascii_hexdigit())
+    };
+    let commit_target = if opts.refs.len() == 1 && hashy(&opts.refs[0]) {
+        Some(opts.refs[0].clone())
+    } else {
+        opts.filter
+            .as_deref()
+            .filter(|f| hashy(f))
+            .map(str::to_string)
+    };
+    if let Some(commit) = &commit_target {
+        let containing = branches_containing(&repo_root, commit);
+        if !containing.is_empty() {
+            eprintln!(
+                "… commit {commit} is contained in: {}",
+                containing.join(", ")
+            );
+        }
+    }
+
+    let cancel = AtomicBool::new(false);
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut broken_pipe = false;
+    let mut collected: Vec<BranchHit> = Vec::new();
+
+    if matches!(format, Some(OutputFormat::Markdown)) {
+        let _ = writeln!(out, "# yoink branch results\n");
+        let _ = writeln!(
+            out,
+            "_query `{}` · {mode_token} · {case_tok}_\n",
+            opts.query
+        );
+    }
+
+    let outcome = search_branches(&repo_root, &search_opts, &cancel, |event| match event {
+        BranchEvent::Fetching => eprintln!("… fetching remotes (git fetch --all)"),
+        BranchEvent::FetchFailed(err) => {
+            eprintln!("! fetch failed ({err}); searching refs already present")
+        }
+        BranchEvent::Enumerated { total } => eprintln!("… searching {total} ref(s), newest first"),
+        BranchEvent::RefStarted { index, total, name } => {
+            eprintln!("… [{}/{total}] {name}", index + 1)
+        }
+        BranchEvent::Hit(hit) => {
+            if broken_pipe {
+                return;
+            }
+            let written = match format {
+                Some(OutputFormat::Jsonl) => write_branch_jsonl(&mut out, &hit),
+                Some(OutputFormat::Markdown) => write_branch_markdown(&mut out, &hit),
+                Some(OutputFormat::Json) => {
+                    collected.push(hit);
+                    Ok(())
+                }
+                Some(OutputFormat::Text) | None => write_branch_text(&mut out, &hit),
+            };
+            if let Err(err) = written {
+                if err.kind() == ErrorKind::BrokenPipe {
+                    broken_pipe = true;
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        BranchEvent::Finished {
+            searched,
+            hits,
+            truncated,
+        } => {
+            if matches!(format, Some(OutputFormat::Json)) && !broken_pipe {
+                let envelope = JsonBranchEnvelope {
+                    query: &opts.query,
+                    mode: mode_token,
+                    case: case_tok,
+                    root: root_display.clone(),
+                    refs_searched: searched,
+                    count: collected.len(),
+                    truncated,
+                    results: collected.iter().map(JsonBranchResult::from_hit).collect(),
+                };
+                let mut text =
+                    serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| "{}".to_string());
+                text.push('\n');
+                let _ = out.write_all(text.as_bytes());
+                let _ = out.flush();
+            }
+            eprintln!(
+                "done: {hits} hit(s) across {searched} ref(s){}",
+                if truncated {
+                    " (stopped early — more may exist)"
+                } else {
+                    ""
+                }
+            );
+        }
+    });
+
+    // A closed downstream pipe is a normal, successful early exit.
+    if broken_pipe {
+        return Ok(());
+    }
+    outcome
 }

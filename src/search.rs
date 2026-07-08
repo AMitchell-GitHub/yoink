@@ -99,6 +99,16 @@ pub struct YoinkSettings {
     pub sort: Sort,
     /// Whether to check GitHub for a newer release on startup. Default true.
     pub update_check: bool,
+    /// Search scope: which sources a normal (Enter) search covers. Default is
+    /// the working tree only; the F6 menu toggles branch sources on. When a
+    /// branch source is on, `branch_filter`/`branch_timeframe` narrow the refs
+    /// and `branch_fetch` runs `git fetch --all` before searching remotes.
+    pub scope_working_tree: bool,
+    pub scope_local_branches: bool,
+    pub scope_remote_branches: bool,
+    pub branch_filter: String,
+    pub branch_timeframe: String,
+    pub branch_fetch: bool,
     pub binds: Binds,
     /// Path the settings were loaded from (or would be written to if config
     /// doesn't exist yet). `None` if no $HOME is available.
@@ -110,6 +120,9 @@ pub struct SearchEntry {
     pub display: String,
     pub path: PathBuf,
     pub line: Option<usize>,
+    /// The git ref this hit came from, for cross-branch results. `None` for
+    /// ordinary working-tree matches (the file is on disk at `path`).
+    pub reference: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +169,12 @@ pub fn load_settings() -> Result<YoinkSettings> {
     let mut case_sensitive = false;
     let mut sort = Sort::Depth;
     let mut update_check = true;
+    let mut scope_working_tree = true;
+    let mut scope_local_branches = false;
+    let mut scope_remote_branches = false;
+    let mut branch_filter = String::new();
+    let mut branch_timeframe = String::new();
+    let mut branch_fetch = true;
     let mut binds: Binds = Vec::new();
     // Globs default to the built-in safe set when no config exists at all
     // (e.g. the `yoink __search` headless path with no $HOME). Once a config
@@ -258,6 +277,52 @@ pub fn load_settings() -> Result<YoinkSettings> {
                             })?;
                             continue;
                         }
+                        "scope_working_tree" => {
+                            scope_working_tree = parse_bool_setting(value).with_context(|| {
+                                format!(
+                                    "invalid scope_working_tree value in {}: {value}",
+                                    config_file.display()
+                                )
+                            })?;
+                            continue;
+                        }
+                        "scope_local_branches" => {
+                            scope_local_branches =
+                                parse_bool_setting(value).with_context(|| {
+                                    format!(
+                                        "invalid scope_local_branches value in {}: {value}",
+                                        config_file.display()
+                                    )
+                                })?;
+                            continue;
+                        }
+                        "scope_remote_branches" => {
+                            scope_remote_branches =
+                                parse_bool_setting(value).with_context(|| {
+                                    format!(
+                                        "invalid scope_remote_branches value in {}: {value}",
+                                        config_file.display()
+                                    )
+                                })?;
+                            continue;
+                        }
+                        "branch_filter" => {
+                            branch_filter = value.to_string();
+                            continue;
+                        }
+                        "branch_timeframe" => {
+                            branch_timeframe = value.to_string();
+                            continue;
+                        }
+                        "branch_fetch" => {
+                            branch_fetch = parse_bool_setting(value).with_context(|| {
+                                format!(
+                                    "invalid branch_fetch value in {}: {value}",
+                                    config_file.display()
+                                )
+                            })?;
+                            continue;
+                        }
                         _ => {}
                     }
                 }
@@ -289,6 +354,12 @@ pub fn load_settings() -> Result<YoinkSettings> {
         case_sensitive,
         sort,
         update_check,
+        scope_working_tree,
+        scope_local_branches,
+        scope_remote_branches,
+        branch_filter,
+        branch_timeframe,
+        branch_fetch,
         binds,
         source_path: source,
     })
@@ -607,6 +678,7 @@ pub fn build_search_entries(
                 display: format!("{} {}", icon, path_display),
                 path: candidate.path.clone(),
                 line: None,
+                reference: None,
             });
 
             let line_width = occurrences
@@ -634,6 +706,7 @@ pub fn build_search_entries(
                     ),
                     path: candidate.path.clone(),
                     line: Some(occurrence.line),
+                    reference: None,
                 });
             }
         }
@@ -711,6 +784,7 @@ pub fn build_blame_sorted_entries(
             display,
             path: path.clone(),
             line: Some(occurrence.line),
+            reference: None,
         });
     }
     Ok(entries)

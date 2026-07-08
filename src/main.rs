@@ -1,5 +1,6 @@
 mod actions;
 mod blame;
+mod branches;
 mod cli;
 mod headless;
 mod keys;
@@ -11,7 +12,7 @@ mod update;
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, InternalCommand};
-use headless::{run_headless, HeadlessOptions};
+use headless::{run_branch_search, run_headless, BranchHeadlessOptions, HeadlessOptions};
 use search::run_search_streaming;
 use std::env;
 use which::which;
@@ -51,6 +52,33 @@ fn run() -> Result<()> {
             return Ok(());
         }
         None => {}
+    }
+
+    // Cross-branch search: `--branches` (or `--ref`) searches other git refs
+    // with `git grep` and streams the hits. Uses `git`, not `rg`, and never
+    // launches the TUI. Honors `-o` for the output format (defaults to
+    // grep-style text when omitted).
+    if cli.branches || !cli.refs.is_empty() {
+        ensure_dependency("git")?;
+        let query = cli
+            .query_flag
+            .clone()
+            .or_else(|| cli.query.clone())
+            .unwrap_or_default();
+        let options = BranchHeadlessOptions {
+            query,
+            format: cli.output,
+            mode: cli.mode.map(|mode| mode.to_mode()),
+            case_sensitive: cli.case.map(|case| case.is_sensitive()),
+            filter: cli.branch_filter.clone(),
+            refs: cli.refs.clone(),
+            since: cli.since.clone(),
+            no_fetch: cli.no_fetch,
+            local_only: cli.local_only,
+            max_results: cli.max_results,
+        };
+        run_branch_search(options, &cwd)?;
+        return Ok(());
     }
 
     // Headless mode: `--output <fmt>` prints a one-shot result set and never

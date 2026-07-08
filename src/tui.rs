@@ -9,6 +9,9 @@
 
 use crate::actions::{self, Action};
 use crate::blame;
+use crate::branches::{
+    parse_timeframe, search_branches, BranchEvent, BranchHit, BranchSearchOptions,
+};
 use crate::keys::{builtin, KeyBind};
 use crate::search::{
     build_blame_sorted_entries, build_search_entries, config_path, load_settings, SearchEntry,
@@ -35,7 +38,9 @@ use ratatui::widgets::{
 use ratatui::{Frame, Terminal};
 use std::io::{stderr, Stderr, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -191,6 +196,9 @@ enum PreviewProgress {
 struct PreviewKey {
     path: PathBuf,
     line: Option<usize>,
+    /// For cross-branch results, the ref to preview via `git show <ref>:<path>`.
+    /// `None` previews the on-disk working-tree file.
+    reference: Option<String>,
 }
 
 /// Messages worker threads push to the main event loop. Terminal events are
@@ -207,6 +215,40 @@ enum AppEvent {
         current: String,
     },
     BlameDone,
+    /// Scoped-search progress/results (working tree + branches). `generation`
+    /// lets the UI drop events from a superseded or cancelled run (the way
+    /// stale previews are dropped by `PreviewKey` identity).
+    Scoped {
+        generation: u64,
+        event: ScopedEvent,
+    },
+}
+
+/// UI-side scoped-search event; owns its data (worker borrows don't cross the
+/// channel) and pre-formats each hit into a `SearchEntry` so it drops straight
+/// into the results list. Covers both the working-tree phase and the
+/// branch phase of a scoped search.
+#[derive(Debug)]
+enum ScopedEvent {
+    Fetching,
+    FetchFailed(String),
+    /// Branch refs resolved; `total` refs will be searched.
+    Enumerated {
+        total: usize,
+    },
+    /// Progress note: `done`/`total` refs searched, `name` is the current phase
+    /// or ref.
+    Progress {
+        done: usize,
+        total: usize,
+        name: String,
+    },
+    Hit(SearchEntry),
+    Finished {
+        searched: usize,
+        hits: usize,
+        truncated: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,23 +257,100 @@ enum Overlay {
     Help,
     Settings,
     QuickPick(QuickPickKind),
+    /// The search-scope menu (F6): toggle working-tree / local / remote
+    /// branches and set the branch filter + timeframe + fetch.
+    ScopeMenu,
     /// One-time keybind-conflict warning shown at startup. Dismissed by any key.
     Warning,
+}
+
+/// The cursor position within the F6 scope menu. The values themselves live on
+/// `YoinkSettings` (session scope), so the menu edits them in place — like the
+/// F3/F4/F5 session pickers — and a normal Enter search then honors them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopeField {
+    WorkingTree,
+    LocalBranches,
+    RemoteBranches,
+    Filter,
+    Timeframe,
+    Fetch,
+}
+
+impl ScopeField {
+    const ORDER: [ScopeField; 6] = [
+        ScopeField::WorkingTree,
+        ScopeField::LocalBranches,
+        ScopeField::RemoteBranches,
+        ScopeField::Filter,
+        ScopeField::Timeframe,
+        ScopeField::Fetch,
+    ];
+
+    fn step(self, dir: isize) -> ScopeField {
+        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0) as isize;
+        let len = Self::ORDER.len() as isize;
+        Self::ORDER[(((idx + dir) % len + len) % len) as usize]
+    }
+
+    /// A short, plain-language description of what the field under the cursor
+    /// does, shown at the bottom of the scope menu.
+    fn help(self) -> &'static str {
+        match self {
+            ScopeField::WorkingTree => "Search the files on disk — your current checkout.",
+            ScopeField::LocalBranches => {
+                "Also search your local branches (git grep, no checkout)."
+            }
+            ScopeField::RemoteBranches => {
+                "Also search remote-tracking branches, e.g. origin/jb/*."
+            }
+            ScopeField::Filter => {
+                "Only branches whose name matches this glob (e.g. jb/* or *redesign*). Empty = all."
+            }
+            ScopeField::Timeframe => {
+                "Only branches updated within this window: 360h, 14d, 3w, 1y. Empty = no limit."
+            }
+            ScopeField::Fetch => {
+                "Run `git fetch --all` before searching remotes so they're up to date (needs network)."
+            }
+        }
+    }
+}
+
+/// Live progress of a running scoped search, shown in the results header.
+#[derive(Debug, Clone, Default)]
+struct ScopedProgress {
+    done: usize,
+    total: usize,
+    current: String,
+    fetching: bool,
 }
 
 /// Working copy of the persisted defaults, edited inside the Settings overlay.
 /// `saved_*` is the on-disk baseline captured when the overlay opened; the
 /// draft is "dirty" (and Save becomes selectable) when it diverges.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SettingsDraft {
     mode: SearchMode,
     case: bool,
     sort: Sort,
     update_check: bool,
+    scope_working_tree: bool,
+    scope_local: bool,
+    scope_remote: bool,
+    branch_filter: String,
+    branch_timeframe: String,
+    branch_fetch: bool,
     saved_mode: SearchMode,
     saved_case: bool,
     saved_sort: Sort,
     saved_update_check: bool,
+    saved_scope_working_tree: bool,
+    saved_scope_local: bool,
+    saved_scope_remote: bool,
+    saved_branch_filter: String,
+    saved_branch_timeframe: String,
+    saved_branch_fetch: bool,
 }
 
 impl SettingsDraft {
@@ -241,10 +360,22 @@ impl SettingsDraft {
             case: s.case_sensitive,
             sort: s.sort,
             update_check: s.update_check,
+            scope_working_tree: s.scope_working_tree,
+            scope_local: s.scope_local_branches,
+            scope_remote: s.scope_remote_branches,
+            branch_filter: s.branch_filter.clone(),
+            branch_timeframe: s.branch_timeframe.clone(),
+            branch_fetch: s.branch_fetch,
             saved_mode: s.search_mode,
             saved_case: s.case_sensitive,
             saved_sort: s.sort,
             saved_update_check: s.update_check,
+            saved_scope_working_tree: s.scope_working_tree,
+            saved_scope_local: s.scope_local_branches,
+            saved_scope_remote: s.scope_remote_branches,
+            saved_branch_filter: s.branch_filter.clone(),
+            saved_branch_timeframe: s.branch_timeframe.clone(),
+            saved_branch_fetch: s.branch_fetch,
         }
     }
 
@@ -253,6 +384,12 @@ impl SettingsDraft {
             || self.case != self.saved_case
             || self.sort != self.saved_sort
             || self.update_check != self.saved_update_check
+            || self.scope_working_tree != self.saved_scope_working_tree
+            || self.scope_local != self.saved_scope_local
+            || self.scope_remote != self.saved_scope_remote
+            || self.branch_filter != self.saved_branch_filter
+            || self.branch_timeframe != self.saved_branch_timeframe
+            || self.branch_fetch != self.saved_branch_fetch
     }
 }
 
@@ -285,6 +422,15 @@ impl QuickPickKind {
                 "blame_young  (youngest blame first)",
                 "blame_old    (oldest blame first)",
             ],
+        }
+    }
+
+    /// One-line explanation of what the picker controls.
+    fn help(self) -> &'static str {
+        match self {
+            QuickPickKind::Mode => "How your query is read: glob wildcards (*, ?) or full regex.",
+            QuickPickKind::Case => "Whether matching distinguishes upper- and lower-case.",
+            QuickPickKind::Sort => "Order of the results list.",
         }
     }
 
@@ -333,6 +479,14 @@ struct App {
     preview_loading: bool,
     pending_open: Option<Action>,
     blame_progress: Option<(usize, usize, String)>,
+    /// Search scope (F6): the menu's cursor position, the live progress of a
+    /// running scoped search, a cancel flag for its worker, and a generation
+    /// counter so a superseded/cancelled run's late events are dropped. The
+    /// scope values themselves live on `settings` (session) — see `ScopeField`.
+    scope_field: ScopeField,
+    scoped_progress: Option<ScopedProgress>,
+    search_cancel: Option<Arc<AtomicBool>>,
+    search_generation: u64,
     events_rx: Receiver<AppEvent>,
     events_tx: Sender<AppEvent>,
     quit: bool,
@@ -376,6 +530,10 @@ impl App {
             preview_loading: false,
             pending_open: None,
             blame_progress: None,
+            scope_field: ScopeField::WorkingTree,
+            scoped_progress: None,
+            search_cancel: None,
+            search_generation: 0,
             events_rx,
             events_tx,
             quit: false,
@@ -477,16 +635,90 @@ impl App {
                 self.blame_progress = None;
                 self.run_search();
             }
+            AppEvent::Scoped { generation, event } => {
+                // Drop events from a superseded or cancelled run.
+                if generation != self.search_generation {
+                    return Ok(());
+                }
+                self.handle_scoped_event(event);
+            }
         }
         Ok(())
     }
 
+    fn handle_scoped_event(&mut self, event: ScopedEvent) {
+        match event {
+            ScopedEvent::Fetching => {
+                self.scoped_progress = Some(ScopedProgress {
+                    fetching: true,
+                    current: "fetching remotes…".to_string(),
+                    ..ScopedProgress::default()
+                });
+            }
+            ScopedEvent::FetchFailed(message) => {
+                self.flash_msg(&format!("fetch failed: {message} (searching cached refs)"));
+                if let Some(progress) = &mut self.scoped_progress {
+                    progress.fetching = false;
+                }
+            }
+            ScopedEvent::Enumerated { total } => {
+                self.scoped_progress = Some(ScopedProgress {
+                    total,
+                    ..ScopedProgress::default()
+                });
+            }
+            ScopedEvent::Progress { done, total, name } => {
+                self.scoped_progress = Some(ScopedProgress {
+                    done,
+                    total,
+                    current: name,
+                    fetching: false,
+                });
+            }
+            ScopedEvent::Hit(entry) => {
+                let was_empty = self.entries.is_empty();
+                self.entries.push(entry);
+                self.last_error = None;
+                if was_empty {
+                    self.selection.select(Some(0));
+                    self.queue_preview();
+                }
+            }
+            ScopedEvent::Finished {
+                searched,
+                hits,
+                truncated,
+            } => {
+                self.searching = false;
+                self.scoped_progress = None;
+                self.search_cancel = None;
+                let refs_note = if searched > 0 {
+                    format!(" across {searched} ref(s)")
+                } else {
+                    String::new()
+                };
+                self.flash_msg(&format!(
+                    "🔎 {hits} hit(s){refs_note}{}",
+                    if truncated { " (capped)" } else { "" }
+                ));
+                if self.entries.is_empty() && self.last_error.is_none() {
+                    self.last_error = Some("no matches in the selected scope".to_string());
+                }
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent, terminal: &mut Tui) -> Result<()> {
-        // Esc closes an open overlay; with no overlay open it quits yoink
-        // (same clean exit as Ctrl-C, no cd).
+        // Esc closes an open overlay (the scope menu also re-runs the search on
+        // close so its edits take effect); else cancels a running scoped search;
+        // else quits yoink (same clean exit as Ctrl-C, no cd).
         if matches!(key.code, KeyCode::Esc) {
-            if self.overlay != Overlay::None {
+            if self.overlay == Overlay::ScopeMenu {
+                self.close_scope_menu();
+            } else if self.overlay != Overlay::None {
                 self.overlay = Overlay::None;
+            } else if self.search_cancel.is_some() {
+                self.cancel_search();
             } else {
                 self.quit = true;
             }
@@ -539,6 +771,16 @@ impl App {
         }
         if builtin::SORT.matches(key) {
             self.open_quick_pick(QuickPickKind::Sort);
+            return Ok(());
+        }
+        if builtin::SCOPE.matches(key) {
+            self.open_scope_menu();
+            return Ok(());
+        }
+
+        // Scope menu handles its own field navigation, toggles, and text input.
+        if self.overlay == Overlay::ScopeMenu {
+            self.handle_scope_menu_key(key);
             return Ok(());
         }
 
@@ -659,19 +901,46 @@ impl App {
 
     fn settings_selectable(&self, row: SettingsRow) -> bool {
         match row {
-            SettingsRow::Header | SettingsRow::Blank => false,
+            SettingsRow::Header | SettingsRow::ScopeHeader | SettingsRow::Blank => false,
             // Save is only reachable/selectable once the draft diverges.
             SettingsRow::Save => self.settings_draft.dirty(),
             _ => true,
         }
     }
 
+    /// The two branch text fields (filter / timeframe) accept typed input.
+    fn settings_text_field(row: SettingsRow) -> bool {
+        matches!(
+            row,
+            SettingsRow::BranchFilter | SettingsRow::BranchTimeframe
+        )
+    }
+
     fn handle_settings_key(&mut self, key: KeyEvent, terminal: &mut Tui) -> Result<()> {
+        let row = SETTINGS_ROWS[self.settings_cursor];
         match key.code {
             KeyCode::Up => self.move_settings_cursor(-1),
             KeyCode::Down => self.move_settings_cursor(1),
             KeyCode::Left => self.cycle_settings_value(-1),
             KeyCode::Right => self.cycle_settings_value(1),
+            // Space toggles a value/toggle row (but is a literal char in the
+            // text fields, handled by the next arm).
+            KeyCode::Char(' ') if !Self::settings_text_field(row) => self.cycle_settings_value(1),
+            // Text editing on the branch filter / timeframe rows.
+            KeyCode::Char(c) if Self::settings_text_field(row) => match row {
+                SettingsRow::BranchFilter => self.settings_draft.branch_filter.push(c),
+                SettingsRow::BranchTimeframe => self.settings_draft.branch_timeframe.push(c),
+                _ => {}
+            },
+            KeyCode::Backspace if Self::settings_text_field(row) => match row {
+                SettingsRow::BranchFilter => {
+                    self.settings_draft.branch_filter.pop();
+                }
+                SettingsRow::BranchTimeframe => {
+                    self.settings_draft.branch_timeframe.pop();
+                }
+                _ => {}
+            },
             KeyCode::Enter => self.activate_settings_row(terminal)?,
             _ => {}
         }
@@ -727,6 +996,18 @@ impl App {
             SettingsRow::UpdateCheck => {
                 self.settings_draft.update_check = !self.settings_draft.update_check;
             }
+            SettingsRow::ScopeWorkingTree => {
+                self.settings_draft.scope_working_tree = !self.settings_draft.scope_working_tree;
+            }
+            SettingsRow::ScopeLocal => {
+                self.settings_draft.scope_local = !self.settings_draft.scope_local;
+            }
+            SettingsRow::ScopeRemote => {
+                self.settings_draft.scope_remote = !self.settings_draft.scope_remote;
+            }
+            SettingsRow::BranchFetch => {
+                self.settings_draft.branch_fetch = !self.settings_draft.branch_fetch;
+            }
             _ => {}
         }
     }
@@ -757,24 +1038,34 @@ impl App {
     }
 
     fn save_default_settings(&mut self) -> Result<()> {
-        let d = self.settings_draft;
+        let d = self.settings_draft.clone();
+        let bool_str = |b: bool| if b { "true" } else { "false" };
         write_setting("search_mode", d.mode.token())?;
-        write_setting("case_sensitive", if d.case { "true" } else { "false" })?;
+        write_setting("case_sensitive", bool_str(d.case))?;
         write_setting("sort", d.sort.token())?;
-        write_setting(
-            "update_check",
-            if d.update_check { "true" } else { "false" },
-        )?;
+        write_setting("update_check", bool_str(d.update_check))?;
+        write_setting("scope_working_tree", bool_str(d.scope_working_tree))?;
+        write_setting("scope_local_branches", bool_str(d.scope_local))?;
+        write_setting("scope_remote_branches", bool_str(d.scope_remote))?;
+        write_setting("branch_filter", &d.branch_filter)?;
+        write_setting("branch_timeframe", &d.branch_timeframe)?;
+        write_setting("branch_fetch", bool_str(d.branch_fetch))?;
         // The on-disk baseline now matches the draft → clean, Save greys out.
         self.settings_draft.saved_mode = d.mode;
         self.settings_draft.saved_case = d.case;
         self.settings_draft.saved_sort = d.sort;
         self.settings_draft.saved_update_check = d.update_check;
+        self.settings_draft.saved_scope_working_tree = d.scope_working_tree;
+        self.settings_draft.saved_scope_local = d.scope_local;
+        self.settings_draft.saved_scope_remote = d.scope_remote;
+        self.settings_draft.saved_branch_filter = d.branch_filter;
+        self.settings_draft.saved_branch_timeframe = d.branch_timeframe;
+        self.settings_draft.saved_branch_fetch = d.branch_fetch;
         // Defaults apply to NEW sessions only; the live session keeps whatever
-        // F3/F4/F5 selected, so self.settings is intentionally untouched.
+        // F3/F4/F5/F6 selected, so self.settings is intentionally untouched.
         self.flash_msg("defaults saved — applies to new sessions");
         // The cursor was on the (now-disabled) Save row; move it back up.
-        self.settings_cursor = settings_row_index(SettingsRow::Sort);
+        self.settings_cursor = settings_row_index(SettingsRow::BranchFetch);
         Ok(())
     }
 
@@ -841,6 +1132,214 @@ impl App {
     fn open_quick_pick(&mut self, kind: QuickPickKind) {
         self.quick_pick_cursor = kind.current_index(&self.settings);
         self.overlay = Overlay::QuickPick(kind);
+    }
+
+    // ─── search scope (F6) ────────────────────────────────────────────────
+    // F6 opens a menu that toggles which sources a normal (Enter) search
+    // covers — working tree, local branches, remote branches — plus a branch
+    // name filter, timeframe, and fetch toggle. The values live on
+    // `self.settings` (session scope, like F3/F4/F5); closing the menu re-runs
+    // the search so the new scope takes effect. Branches are searched with
+    // `git grep <ref>` — nothing is checked out. Esc cancels a running search.
+
+    fn open_scope_menu(&mut self) {
+        self.scope_field = ScopeField::WorkingTree;
+        self.overlay = Overlay::ScopeMenu;
+    }
+
+    /// Close the scope menu. The scope values are already applied to the
+    /// session (edited in place), so the *next* search honors them — closing
+    /// does not search on its own. An invalid timeframe keeps the menu open.
+    fn close_scope_menu(&mut self) {
+        if let Err(error) = parse_timeframe(&self.settings.branch_timeframe) {
+            self.flash_msg(&format!("{error}"));
+            self.scope_field = ScopeField::Timeframe;
+            return;
+        }
+        self.overlay = Overlay::None;
+        self.flash_msg("scope updated — press Enter to search");
+    }
+
+    fn handle_scope_menu_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up => self.scope_field = self.scope_field.step(-1),
+            KeyCode::Down | KeyCode::Tab => self.scope_field = self.scope_field.step(1),
+            KeyCode::Left | KeyCode::Right => self.toggle_scope_field(),
+            KeyCode::Char(' ') => self.toggle_scope_field(),
+            KeyCode::Char(c) => match self.scope_field {
+                ScopeField::Filter => self.settings.branch_filter.push(c),
+                ScopeField::Timeframe => self.settings.branch_timeframe.push(c),
+                _ => {}
+            },
+            KeyCode::Backspace => match self.scope_field {
+                ScopeField::Filter => {
+                    self.settings.branch_filter.pop();
+                }
+                ScopeField::Timeframe => {
+                    self.settings.branch_timeframe.pop();
+                }
+                _ => {}
+            },
+            KeyCode::Enter => self.close_scope_menu(),
+            _ => {}
+        }
+    }
+
+    /// Flip the boolean scope field under the cursor (no-op on the text fields).
+    fn toggle_scope_field(&mut self) {
+        match self.scope_field {
+            ScopeField::WorkingTree => {
+                self.settings.scope_working_tree = !self.settings.scope_working_tree
+            }
+            ScopeField::LocalBranches => {
+                self.settings.scope_local_branches = !self.settings.scope_local_branches
+            }
+            ScopeField::RemoteBranches => {
+                self.settings.scope_remote_branches = !self.settings.scope_remote_branches
+            }
+            ScopeField::Fetch => self.settings.branch_fetch = !self.settings.branch_fetch,
+            ScopeField::Filter | ScopeField::Timeframe => {}
+        }
+    }
+
+    /// True when the current scope includes any branch source.
+    fn branch_scope_active(&self) -> bool {
+        self.settings.scope_local_branches || self.settings.scope_remote_branches
+    }
+
+    fn cancel_search(&mut self) {
+        if let Some(flag) = self.search_cancel.take() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        self.searching = false;
+        self.scoped_progress = None;
+        // Bump the generation so late events from the cancelled worker are
+        // dropped when they arrive.
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.flash_msg("search cancelled");
+    }
+
+    /// Run a scope-aware search that streams working-tree matches (if enabled)
+    /// followed by branch matches (local and/or remote), newest ref first.
+    fn start_scoped_search(&mut self) {
+        // Supersede any prior run and mint a fresh generation + cancel flag.
+        if let Some(flag) = self.search_cancel.take() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.search_cancel = Some(cancel.clone());
+
+        self.entries.clear();
+        self.selection.select(None);
+        self.preview = None;
+        self.preview_body = None;
+        self.last_error = None;
+        self.searching = true;
+        self.scoped_progress = Some(ScopedProgress {
+            current: "starting…".to_string(),
+            ..ScopedProgress::default()
+        });
+
+        let query = self.query.clone();
+        let settings = self.settings.clone();
+        let cwd = self.cwd.clone();
+        let tx = self.events_tx.clone();
+        let want_wt = settings.scope_working_tree;
+        let want_local = settings.scope_local_branches;
+        let want_remote = settings.scope_remote_branches;
+
+        thread::spawn(move || {
+            let send = |event| {
+                let _ = tx.send(AppEvent::Scoped { generation, event });
+            };
+
+            // 1. Working-tree phase (plain depth order; blame sort is a
+            //    working-tree-only feature and is skipped in scoped mode).
+            let mut wt_hits = 0usize;
+            if want_wt && !query.trim().is_empty() {
+                send(ScopedEvent::Progress {
+                    done: 0,
+                    total: 0,
+                    name: "working tree".to_string(),
+                });
+                if let Ok(entries) = build_search_entries(&query, &cwd, &settings) {
+                    wt_hits = entries.len();
+                    for entry in entries {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        send(ScopedEvent::Hit(entry));
+                    }
+                }
+            }
+
+            // 2. Branch phase.
+            let mut branch_hits = 0usize;
+            let mut searched = 0usize;
+            let mut truncated = false;
+            if want_local || want_remote {
+                match blame::find_repo_root(&cwd) {
+                    Some(repo_root) => {
+                        let since = parse_timeframe(&settings.branch_timeframe).ok().flatten();
+                        let filter = {
+                            let trimmed = settings.branch_filter.trim();
+                            (!trimmed.is_empty()).then(|| trimmed.to_string())
+                        };
+                        let opts = BranchSearchOptions {
+                            query: query.clone(),
+                            mode: settings.search_mode,
+                            case_sensitive: settings.case_sensitive,
+                            filter,
+                            explicit_refs: Vec::new(),
+                            since,
+                            include_local: want_local,
+                            include_remotes: want_remote,
+                            fetch: settings.branch_fetch,
+                            max_results: None,
+                        };
+                        let _ = search_branches(&repo_root, &opts, &cancel, |event| match event {
+                            BranchEvent::Fetching => send(ScopedEvent::Fetching),
+                            BranchEvent::FetchFailed(message) => {
+                                send(ScopedEvent::FetchFailed(message))
+                            }
+                            BranchEvent::Enumerated { total } => {
+                                send(ScopedEvent::Enumerated { total })
+                            }
+                            BranchEvent::RefStarted { index, total, name } => {
+                                send(ScopedEvent::Progress {
+                                    done: index,
+                                    total,
+                                    name,
+                                })
+                            }
+                            BranchEvent::Hit(hit) => {
+                                branch_hits += 1;
+                                send(ScopedEvent::Hit(branch_hit_to_entry(&hit)));
+                            }
+                            BranchEvent::Finished {
+                                searched: s,
+                                truncated: t,
+                                ..
+                            } => {
+                                searched = s;
+                                truncated = t;
+                            }
+                        });
+                    }
+                    None => send(ScopedEvent::FetchFailed(
+                        "not inside a git repository".to_string(),
+                    )),
+                }
+            }
+
+            send(ScopedEvent::Finished {
+                searched,
+                hits: wt_hits + branch_hits,
+                truncated,
+            });
+        });
     }
 
     fn handle_quick_pick_key(&mut self, key: KeyEvent, kind: QuickPickKind) -> Result<()> {
@@ -1002,6 +1501,31 @@ impl App {
     }
 
     fn run_search(&mut self) {
+        // Scope (F6) decides which sources this search covers. Nothing enabled
+        // → an explicit prompt; any branch source → the streaming scoped path;
+        // working tree only → the original fast path below (unchanged).
+        if !self.settings.scope_working_tree && !self.branch_scope_active() {
+            // Supersede any in-flight run without the "cancelled" flash.
+            if let Some(flag) = self.search_cancel.take() {
+                flag.store(true, Ordering::Relaxed);
+                self.search_generation = self.search_generation.wrapping_add(1);
+            }
+            self.searching = false;
+            self.scoped_progress = None;
+            self.entries.clear();
+            self.selection.select(None);
+            self.preview = None;
+            self.preview_body = None;
+            self.last_error = Some(
+                "no search sources enabled — press F6 to pick working tree or branches".into(),
+            );
+            return;
+        }
+        if self.branch_scope_active() {
+            self.start_scoped_search();
+            return;
+        }
+
         let query = self.query.clone();
         let cwd = self.cwd.clone();
         let tx = self.events_tx.clone();
@@ -1043,6 +1567,7 @@ impl App {
         let key = PreviewKey {
             path: entry.path.clone(),
             line: entry.line,
+            reference: entry.reference.clone(),
         };
         if self.preview.as_ref() == Some(&key) {
             return;
@@ -1066,7 +1591,12 @@ impl App {
     }
 
     fn start_blame_warmup_if_needed(&mut self) {
-        if !blame::blame_sort_active(&self.settings) || self.query.trim().is_empty() {
+        // Blame sort applies to the working-tree search only; when a branch
+        // source is in scope, skip the warmup and go straight to the search.
+        if self.branch_scope_active()
+            || !blame::blame_sort_active(&self.settings)
+            || self.query.trim().is_empty()
+        {
             self.run_search();
             return;
         }
@@ -1145,6 +1675,12 @@ impl App {
             return Ok(());
         };
         let rel = entry.path.to_string_lossy().to_string();
+        // A cross-branch result isn't in the working tree, so cd/open/edit have
+        // nothing to point at. Copy actions still work (they yield ref:path:line).
+        if entry.reference.is_some() && !matches!(action, Action::CopyPath | Action::CopyName) {
+            self.flash_msg("branch result: not on disk — use copy (Enter previews via git show)");
+            return Ok(());
+        }
         match action {
             Action::Cd => {
                 let target = actions::cd_target(&self.cwd, &rel);
@@ -1182,12 +1718,15 @@ impl App {
                 }
             }
             Action::CopyPath => {
-                // Full absolute path on disk (with `:line` suffix for an
-                // occurrence row). The relative path was confusing on
-                // results in the cwd root — they looked identical to the
-                // basename.
-                let full = self.cwd.join(&entry.path);
-                let mut text = full.display().to_string();
+                // For a branch result copy `ref:path[:line]` (the file isn't on
+                // disk). Otherwise the full absolute path on disk (with `:line`
+                // suffix for an occurrence row) — the relative path was confusing
+                // on results in the cwd root, they looked identical to the basename.
+                let mut text = if let Some(reference) = &entry.reference {
+                    format!("{reference}:{rel}")
+                } else {
+                    self.cwd.join(&entry.path).display().to_string()
+                };
                 if let Some(l) = entry.line {
                     text.push_str(&format!(":{l}"));
                 }
@@ -1241,6 +1780,7 @@ impl App {
             Overlay::Help => self.draw_help_overlay(frame, area),
             Overlay::Settings => self.draw_settings_overlay(frame, area),
             Overlay::QuickPick(kind) => self.draw_quick_pick_overlay(frame, area, kind),
+            Overlay::ScopeMenu => self.draw_scope_menu_overlay(frame, area),
             Overlay::Warning => self.draw_warning_overlay(frame, area),
             Overlay::None => {}
         }
@@ -1336,6 +1876,38 @@ impl App {
                 ),
                 Span::raw(" "),
             ])
+        } else if let Some(progress) = &self.scoped_progress {
+            let label = if progress.fetching {
+                "🔎 fetching remotes…".to_string()
+            } else if progress.total == 0 {
+                format!(
+                    "🔎 {} · {} hits",
+                    if progress.current.is_empty() {
+                        "searching…"
+                    } else {
+                        &progress.current
+                    },
+                    self.entries.len()
+                )
+            } else {
+                format!(
+                    "🔎 {}/{} refs · {} hits · {}",
+                    progress.done,
+                    progress.total,
+                    self.entries.len(),
+                    truncate(&progress.current, 28)
+                )
+            };
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+            ])
         } else {
             Line::from(vec![
                 Span::raw(" "),
@@ -1363,7 +1935,7 @@ impl App {
                     )]),
                     Line::from(""),
                     Line::from(vec![Span::styled(
-                        "  F3: search mode   F4: case   F5: sort   F1: all binds",
+                        "  F3: mode   F4: case   F5: sort   F6: branches   F1: all binds",
                         Style::default().fg(Color::DarkGray),
                     )]),
                 ])
@@ -1443,8 +2015,31 @@ impl App {
 
     fn draw_hint(&self, frame: &mut Frame<'_>, area: Rect) {
         let mut bits: Vec<Span> = Vec::new();
+        // Function keys in numeric order (F1..F6), then core nav, then binds.
+        {
+            let mut push_key = |label: &str, desc: &str, color: Color| {
+                bits.push(Span::styled(
+                    format!("{label} "),
+                    Style::default().fg(color),
+                ));
+                bits.push(Span::styled(
+                    desc.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                bits.push(Span::raw("  "));
+            };
+            // All function-key labels share one color so the row reads as a
+            // single set of controls.
+            let key_color = Color::Cyan;
+            push_key(builtin::HELP.label, "all binds", key_color);
+            push_key(builtin::SETTINGS.label, "settings", key_color);
+            push_key(builtin::MODE.label, "mode", key_color);
+            push_key(builtin::CASE.label, "case", key_color);
+            push_key(builtin::SORT.label, "sort", key_color);
+            push_key(builtin::SCOPE.label, "scope", key_color);
+        }
         bits.push(Span::styled(
-            " Enter ",
+            "Enter ",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -1454,39 +2049,7 @@ impl App {
         bits.push(Span::styled("↑↓ ", Style::default().fg(Color::DarkGray)));
         bits.push(Span::styled("move", Style::default().fg(Color::DarkGray)));
         bits.push(Span::raw("  "));
-        bits.push(Span::styled(
-            format!(
-                "{}/{}/{} ",
-                builtin::MODE.label,
-                builtin::CASE.label,
-                builtin::SORT.label
-            ),
-            Style::default().fg(Color::Magenta),
-        ));
-        bits.push(Span::styled(
-            "mode/case/sort menu",
-            Style::default().fg(Color::DarkGray),
-        ));
-        bits.push(Span::raw("  "));
-        bits.push(Span::styled(
-            format!("{} ", builtin::SETTINGS.label),
-            Style::default().fg(Color::Yellow),
-        ));
-        bits.push(Span::styled(
-            "settings",
-            Style::default().fg(Color::DarkGray),
-        ));
-        bits.push(Span::raw("  "));
-        bits.push(Span::styled(
-            format!("{} ", builtin::HELP.label),
-            Style::default().fg(Color::Yellow),
-        ));
-        bits.push(Span::styled(
-            "all binds",
-            Style::default().fg(Color::DarkGray),
-        ));
-        bits.push(Span::raw("  "));
-        // First two configured open-action binds as inline hints.
+        // First few configured open-action binds as inline hints.
         for (k, a) in self.settings.binds.iter().take(3) {
             bits.push(Span::styled(
                 format!("{k} ", k = k),
@@ -1539,6 +2102,30 @@ impl App {
             Span::raw("   "),
             chip(sort_label, Color::Rgb(170, 80, 50), Color::White),
         ];
+
+        // Scope chip — only shown when it's not the plain working-tree default,
+        // so the user notices a search that reaches into branches.
+        let mut sources: Vec<&str> = Vec::new();
+        if self.settings.scope_working_tree {
+            sources.push("tree");
+        }
+        if self.settings.scope_local_branches {
+            sources.push("local");
+        }
+        if self.settings.scope_remote_branches {
+            sources.push("remote");
+        }
+        let default_scope = self.settings.scope_working_tree && !self.branch_scope_active();
+        if !default_scope {
+            let label = if sources.is_empty() {
+                " scope: none! ".to_string()
+            } else {
+                format!(" scope: {} ", sources.join("+"))
+            };
+            line.push(Span::raw("   "));
+            line.push(chip(&label, Color::Rgb(40, 120, 90), Color::White));
+        }
+
         if self.settings.search_mode == SearchMode::Regex && !self.settings.case_sensitive {
             line.push(Span::raw("   "));
             line.push(Span::styled(
@@ -1638,6 +2225,7 @@ impl App {
         lines.push(help_row(builtin::MODE.label, builtin::MODE.desc));
         lines.push(help_row(builtin::CASE.label, builtin::CASE.desc));
         lines.push(help_row(builtin::SORT.label, builtin::SORT.desc));
+        lines.push(help_row(builtin::SCOPE.label, builtin::SCOPE.desc));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
             "to change the default for new sessions: F2 → edit the values → Save",
@@ -1705,6 +2293,133 @@ impl App {
         );
     }
 
+    fn draw_scope_menu_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
+        let popup = centered_rect(74, 64, area);
+        frame.render_widget(Clear, popup);
+        let s = &self.settings;
+        let active = self.scope_field;
+
+        // A toggle row: `[x] label` (or `[ ]`), highlighted when it's the cursor.
+        let toggle_line = |label: &str, on: bool, is_active: bool| -> Line<'static> {
+            let marker = if is_active { "›" } else { " " };
+            let box_ = if on { "[x]" } else { "[ ]" };
+            let style = if is_active {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else if on {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            Line::from(vec![Span::styled(
+                format!("  {marker} {box_} {label}"),
+                style,
+            )])
+        };
+
+        // A text row: `label   value▏` with a caret when it's the cursor.
+        let text_line = |label: &str, value: String, is_active: bool| -> Line<'static> {
+            let marker = if is_active { "›" } else { " " };
+            let label_style = if is_active {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(vec![
+                Span::raw(format!("  {marker} ")),
+                Span::styled(format!("{label:<16}"), label_style),
+                Span::styled(value, Style::default().fg(Color::Yellow)),
+            ])
+        };
+
+        let filter_display = if active == ScopeField::Filter {
+            format!("{}▏", s.branch_filter)
+        } else if s.branch_filter.trim().is_empty() {
+            "(all matching refs)".to_string()
+        } else {
+            s.branch_filter.clone()
+        };
+        let timeframe_display = if active == ScopeField::Timeframe {
+            format!("{}▏", s.branch_timeframe)
+        } else if s.branch_timeframe.trim().is_empty() {
+            "(no limit)".to_string()
+        } else {
+            s.branch_timeframe.clone()
+        };
+
+        let lines = vec![
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "  🔎 Search scope — what a search covers",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            toggle_line(
+                "Working tree",
+                s.scope_working_tree,
+                active == ScopeField::WorkingTree,
+            ),
+            toggle_line(
+                "Local branches",
+                s.scope_local_branches,
+                active == ScopeField::LocalBranches,
+            ),
+            toggle_line(
+                "Remote branches",
+                s.scope_remote_branches,
+                active == ScopeField::RemoteBranches,
+            ),
+            Line::from(""),
+            text_line(
+                "Branch filter",
+                filter_display,
+                active == ScopeField::Filter,
+            ),
+            text_line(
+                "Updated within",
+                timeframe_display,
+                active == ScopeField::Timeframe,
+            ),
+            toggle_line(
+                "Fetch all first",
+                s.branch_fetch,
+                active == ScopeField::Fetch,
+            ),
+            Line::from(""),
+            // Explanation of the field under the cursor.
+            Line::from(vec![
+                Span::styled("  ⓘ  ", Style::default().fg(Color::Cyan)),
+                Span::styled(active.help(), Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "  ↑↓ move · space/←→ toggle · type to edit · Enter apply · Esc close",
+                Style::default().fg(Color::DarkGray),
+            )]),
+            Line::from(vec![Span::styled(
+                "  then just search as usual — Enter runs across everything enabled",
+                Style::default().fg(Color::DarkGray),
+            )]),
+        ];
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" search scope (F6) ");
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            popup,
+        );
+    }
+
     fn draw_quick_pick_overlay(&self, frame: &mut Frame<'_>, area: Rect, kind: QuickPickKind) {
         let labels = kind.labels();
         // Width tracks the widest option label + arrow + padding; clamped to
@@ -1712,10 +2427,11 @@ impl App {
         let max_label = labels.iter().map(|s| s.chars().count()).max().unwrap_or(20);
         let title_len = kind.title().chars().count();
         let footer_len = "↑↓ choose · Enter confirm · Esc cancel".chars().count();
-        let inner_w = max_label.max(title_len).max(footer_len) + 6;
+        let help_len = kind.help().chars().count();
+        let inner_w = max_label.max(title_len).max(footer_len).max(help_len) + 6;
         let width = (inner_w as u16 + 4).min(area.width.saturating_sub(4));
-        // Height: title + blank + options + blank + footer + borders.
-        let height = (labels.len() as u16) + 6;
+        // Height: title + blank + options + blank + help + blank + footer + borders.
+        let height = (labels.len() as u16) + 8;
 
         let x = area.x + area.width.saturating_sub(width) / 2;
         let y = area.y + area.height.saturating_sub(height) / 2;
@@ -1744,6 +2460,11 @@ impl App {
                 Span::styled((*label).to_string(), style),
             ]));
         }
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  ⓘ  ", Style::default().fg(Color::Magenta)),
+            Span::styled(kind.help(), Style::default().fg(Color::Gray)),
+        ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::raw("  "),
@@ -1776,11 +2497,14 @@ impl App {
     }
 
     fn draw_settings_overlay(&self, frame: &mut Frame<'_>, area: Rect) {
-        let popup = centered_rect(60, 60, area);
+        let popup = centered_rect(64, 82, area);
         frame.render_widget(Clear, popup);
 
         let draft = &self.settings_draft;
         let dirty = draft.dirty();
+        let active_row = SETTINGS_ROWS[self
+            .settings_cursor
+            .min(SETTINGS_ROWS.len().saturating_sub(1))];
         let mode_label = match draft.mode {
             SearchMode::Glob => "glob",
             SearchMode::Regex => "regex",
@@ -1796,13 +2520,14 @@ impl App {
             Sort::BlameYoung => "youngest blame first",
             Sort::BlameOld => "oldest blame first",
         };
-        let update_check_label = if draft.update_check { "on" } else { "off" };
+        let on_off = |b: bool| if b { "on" } else { "off" };
+        let update_check_label = on_off(draft.update_check);
 
         // A value row: indented label + a cyan `‹ value ›` showing it cycles.
         let value_row = |label: &str, value: &str| {
             Line::from(vec![
                 Span::raw("    "),
-                Span::styled(format!("{label:<14}"), Style::default().fg(Color::White)),
+                Span::styled(format!("{label:<16}"), Style::default().fg(Color::White)),
                 Span::styled("‹ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     value.to_string(),
@@ -1811,6 +2536,23 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" ›", Style::default().fg(Color::DarkGray)),
+            ])
+        };
+
+        // A text row: indented label + the typed value; a caret marks the row
+        // being edited (when it's under the cursor).
+        let text_row = |label: &str, value: &str, is_active: bool| {
+            let shown = if value.is_empty() && !is_active {
+                "(none)".to_string()
+            } else if is_active {
+                format!("{value}▏")
+            } else {
+                value.to_string()
+            };
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(format!("{label:<16}"), Style::default().fg(Color::White)),
+                Span::styled(shown, Style::default().fg(Color::Yellow)),
             ])
         };
 
@@ -1827,6 +2569,30 @@ impl App {
                 SettingsRow::Case => value_row("sensitivity", case_label),
                 SettingsRow::Sort => value_row("sorting", sort_label),
                 SettingsRow::UpdateCheck => value_row("update check", update_check_label),
+                SettingsRow::ScopeHeader => Line::from(vec![Span::styled(
+                    "Search scope (F6) defaults:",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )]),
+                SettingsRow::ScopeWorkingTree => {
+                    value_row("working tree", on_off(draft.scope_working_tree))
+                }
+                SettingsRow::ScopeLocal => value_row("local branches", on_off(draft.scope_local)),
+                SettingsRow::ScopeRemote => {
+                    value_row("remote branches", on_off(draft.scope_remote))
+                }
+                SettingsRow::BranchFilter => text_row(
+                    "branch filter",
+                    &draft.branch_filter,
+                    active_row == SettingsRow::BranchFilter,
+                ),
+                SettingsRow::BranchTimeframe => text_row(
+                    "updated within",
+                    &draft.branch_timeframe,
+                    active_row == SettingsRow::BranchTimeframe,
+                ),
+                SettingsRow::BranchFetch => value_row("fetch all", on_off(draft.branch_fetch)),
                 SettingsRow::Save => {
                     if dirty {
                         Line::from(vec![
@@ -1879,13 +2645,21 @@ impl App {
             self.settings_cursor
                 .min(SETTINGS_ROWS.len().saturating_sub(1)),
         ));
+
+        // Reserve the bottom two lines for a plain-language explanation of the
+        // row under the cursor; the list takes the rest.
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(2)])
+            .split(popup);
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
             .border_style(Style::default().fg(Color::Magenta))
             .title(Line::from(" settings "))
             .title_bottom(Line::from(
-                " ↑↓ move · ←→ change · Enter select · Esc close ",
+                " ↑↓ move · ←→/space change · type to edit · Enter select/save · Esc close ",
             ));
         let list = List::new(items)
             .block(block)
@@ -1895,7 +2669,17 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, popup, &mut state);
+        frame.render_stateful_widget(list, chunks[0], &mut state);
+
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled("  ⓘ  ", Style::default().fg(Color::Magenta)),
+            Span::styled(
+                settings_row_help(active_row),
+                Style::default().fg(Color::Gray),
+            ),
+        ]))
+        .wrap(Wrap { trim: true });
+        frame.render_widget(help, chunks[1]);
     }
 
     fn draw_flash(&self, frame: &mut Frame<'_>, area: Rect, msg: &str) {
@@ -2009,6 +2793,13 @@ enum SettingsRow {
     Case,
     Sort,
     UpdateCheck,
+    ScopeHeader,
+    ScopeWorkingTree,
+    ScopeLocal,
+    ScopeRemote,
+    BranchFilter,
+    BranchTimeframe,
+    BranchFetch,
     Save,
     Blank,
     EditConfig,
@@ -2016,12 +2807,20 @@ enum SettingsRow {
     AddClaudeGuide,
 }
 
-const SETTINGS_ROWS: [SettingsRow; 10] = [
+const SETTINGS_ROWS: [SettingsRow; 18] = [
     SettingsRow::Header,
     SettingsRow::Mode,
     SettingsRow::Case,
     SettingsRow::Sort,
     SettingsRow::UpdateCheck,
+    SettingsRow::Blank,
+    SettingsRow::ScopeHeader,
+    SettingsRow::ScopeWorkingTree,
+    SettingsRow::ScopeLocal,
+    SettingsRow::ScopeRemote,
+    SettingsRow::BranchFilter,
+    SettingsRow::BranchTimeframe,
+    SettingsRow::BranchFetch,
     SettingsRow::Save,
     SettingsRow::Blank,
     SettingsRow::EditConfig,
@@ -2031,6 +2830,35 @@ const SETTINGS_ROWS: [SettingsRow; 10] = [
 
 fn settings_row_index(row: SettingsRow) -> usize {
     SETTINGS_ROWS.iter().position(|r| *r == row).unwrap_or(0)
+}
+
+/// A short, plain-language description of the settings row under the cursor,
+/// shown at the bottom of the F2 overlay. These are the *defaults for new
+/// sessions* (F3–F6 change the live session only).
+fn settings_row_help(row: SettingsRow) -> &'static str {
+    match row {
+        SettingsRow::Header => "Defaults for new sessions. F3–F6 change the live session instead.",
+        SettingsRow::Mode => "Query language: glob (*, ?) or full regex.",
+        SettingsRow::Case => "Whether matching is case-sensitive.",
+        SettingsRow::Sort => "Result order: path depth, alphabetical, or git-blame age.",
+        SettingsRow::UpdateCheck => "Check GitHub for a newer yoink on startup (once a day).",
+        SettingsRow::ScopeHeader => "What a search covers by default — the F6 menu, persisted.",
+        SettingsRow::ScopeWorkingTree => "Search the files on disk (your current checkout).",
+        SettingsRow::ScopeLocal => "Also search local branches (git grep, no checkout).",
+        SettingsRow::ScopeRemote => "Also search remote-tracking branches, e.g. origin/jb/*.",
+        SettingsRow::BranchFilter => "Default branch-name glob (e.g. jb/*). Empty = all refs.",
+        SettingsRow::BranchTimeframe => {
+            "Default recency window: 360h, 14d, 3w, 1y. Empty = no limit."
+        }
+        SettingsRow::BranchFetch => {
+            "Run `git fetch --all` before searching remotes (needs network)."
+        }
+        SettingsRow::Save => "Write these defaults to your config file.",
+        SettingsRow::EditConfig => "Open ~/.yoink-config in your editor.",
+        SettingsRow::ShowDefault => "View the annotated default config for reference.",
+        SettingsRow::AddClaudeGuide => "Write a yoink usage guide into ~/.claude/CLAUDE.md.",
+        SettingsRow::Blank => "",
+    }
 }
 
 const CLAUDE_GUIDE_BEGIN: &str = "<!-- >>> yoink headless guide (managed by yoink) >>> -->";
@@ -2065,6 +2893,22 @@ yoink -q '-C' -m regex -o markdown                          # query starting '-'
 - `--case <sensitive|insensitive>`, `-C, --context <N>` (default 10), `--blame`, `--content-only`.
 - `-q, --query <SEARCH>` — query as a flag; use it when the query starts with `-`.
 - Overrides apply to the run only; config is never written. Single-quote the query so spaces/quotes/regex survive (like `rg`).
+
+## Cross-branch search (`--branches`)
+Find a term on *other* git branches without checking any out (`git grep <ref>`,
+newest ref first). Hits stream to stdout, progress to stderr — so you can stop
+as soon as you see the match.
+- `--branches` enables it; `--branch-filter '<glob>'` limits refs by name (e.g.
+  `jb/*`, matched as a substring so `origin/jb/*` counts); `--since <360h|14d|3w|1y|all>`
+  limits by last-update; `--ref <COMMITISH>` searches one branch/tag/commit
+  (short or long hash), repeatable. Fetches remotes first unless `--no-fetch`.
+- `--max-results N` **stops the search early** (not just the output) — the
+  cancel-once-found lever. Use `-o jsonl`/`text` for streaming; `| head` is safe.
+```sh
+yoink '__gtp_signed_out__' --branches --branch-filter 'jb/*' --since 30d -o markdown
+yoink 'TODO' --branches -o jsonl --max-results 1   # stream, stop at first hit
+yoink 'signout' --ref 1b7c2113 -o text             # search one commit
+```
 <!-- <<< yoink headless guide <<< -->
 "#;
 
@@ -2123,7 +2967,7 @@ fn upsert_claude_guide(existing: &str, section: &str) -> String {
 /// config binds that would be shadowed by a built-in.
 fn reserved_keys() -> Vec<(KeyBind, &'static str)> {
     use crate::keys::builtin::*;
-    let mut v: Vec<(KeyBind, &'static str)> = [HELP, SETTINGS, MODE, CASE, SORT, QUIT]
+    let mut v: Vec<(KeyBind, &'static str)> = [HELP, SETTINGS, MODE, CASE, SORT, SCOPE, QUIT]
         .iter()
         .map(|b| (b.bind(), b.desc))
         .collect();
@@ -2307,11 +3151,40 @@ fn truncate(s: &str, n: usize) -> String {
     out
 }
 
+/// Format a cross-branch hit into a results-list entry: dim committer date,
+/// green ref, cyan path, magenta line, then the matched line. Carries the ref
+/// so the preview/copy paths know the file lives on a branch, not on disk.
+fn branch_hit_to_entry(hit: &BranchHit) -> SearchEntry {
+    let date = hit
+        .committed_ts
+        .map(crate::blame::format_unix_date)
+        .unwrap_or_else(|| "----------".to_string());
+    let display = format!(
+        "\x1b[2;37m{date}\x1b[0m  \x1b[1;32m{}\x1b[0m  \x1b[36m{}\x1b[0m:\x1b[35m{}\x1b[0m  {}",
+        hit.reference,
+        hit.path.to_string_lossy(),
+        hit.line,
+        truncate(&hit.content, 140),
+    );
+    SearchEntry {
+        display,
+        path: hit.path.clone(),
+        line: Some(hit.line),
+        reference: Some(hit.reference.clone()),
+    }
+}
+
 /// Run bat to produce a syntax-highlighted preview body. Returns the raw
 /// ANSI text; the renderer converts it to ratatui `Text` on the UI thread.
 /// Includes a one-line blame header above the file body.
 fn render_preview(cwd: &Path, key: &PreviewKey) -> Result<String> {
     use std::process::Command;
+
+    // Cross-branch result: the file isn't on disk — read it from the ref.
+    if let Some(reference) = &key.reference {
+        return render_branch_preview(cwd, reference, key);
+    }
+
     let full = cwd.join(&key.path);
 
     let mut header = String::new();
@@ -2353,6 +3226,81 @@ fn render_preview(cwd: &Path, key: &PreviewKey) -> Result<String> {
         body.push_str(&String::from_utf8_lossy(&output.stdout));
     } else {
         body.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(body)
+}
+
+/// Preview a file as it exists on another ref via `git show <ref>:<path>`,
+/// syntax-highlighted with bat. The blob is written to a temp file (rather than
+/// piped through bat's stdin) so a large file can't deadlock the stdin/stdout
+/// pipes, and so bat detects the language from the extension.
+fn render_branch_preview(cwd: &Path, reference: &str, key: &PreviewKey) -> Result<String> {
+    use std::hash::{Hash, Hasher};
+    use std::process::{Command, Stdio};
+
+    let path_str = key.path.to_string_lossy();
+    let mut header = format!("\x1b[1;32m🌿 {reference}\x1b[0m  \x1b[36m{path_str}\x1b[0m");
+    if let Some(line) = key.line {
+        header.push_str(&format!(":\x1b[35m{line}\x1b[0m"));
+    }
+    header.push('\n');
+    header.push_str(&"─".repeat(40));
+    header.push('\n');
+
+    let spec = format!("{reference}:{path_str}");
+    let show = Command::new("git")
+        .current_dir(cwd)
+        .arg("show")
+        .arg(&spec)
+        .stderr(Stdio::piped())
+        .output()
+        .context("git show failed")?;
+    if !show.status.success() {
+        header.push_str(&String::from_utf8_lossy(&show.stderr));
+        return Ok(header);
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    spec.hash(&mut hasher);
+    let ext = key
+        .path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    let tmp = std::env::temp_dir().join(format!(
+        "yoink-bp-{}-{:x}{ext}",
+        std::process::id(),
+        hasher.finish()
+    ));
+    if std::fs::write(&tmp, &show.stdout).is_err() {
+        header.push_str(&String::from_utf8_lossy(&show.stdout));
+        return Ok(header);
+    }
+
+    let mut bat = Command::new("bat");
+    bat.arg("--style=numbers")
+        .arg("--color=always")
+        .arg("--paging=never");
+    if let Some(line) = key.line {
+        let ctx = 30usize;
+        let start = if line > ctx { line - ctx } else { 1 };
+        let end = line + ctx;
+        bat.arg("--highlight-line")
+            .arg(line.to_string())
+            .arg("--line-range")
+            .arg(format!("{start}:{end}"));
+    } else {
+        bat.arg("--line-range=:300");
+    }
+    let output = bat.arg(&tmp).output();
+    let _ = std::fs::remove_file(&tmp);
+
+    let mut body = header;
+    match output {
+        Ok(out) if out.status.success() => body.push_str(&String::from_utf8_lossy(&out.stdout)),
+        // bat missing or errored — fall back to the raw blob content.
+        _ => body.push_str(&String::from_utf8_lossy(&show.stdout)),
     }
     Ok(body)
 }

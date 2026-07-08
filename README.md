@@ -145,10 +145,11 @@ Always available, no menu required:
 - **F3** — open the search-mode picker (glob / regex), cursor on the current value
 - **F4** — open the case-sensitivity picker (insensitive / sensitive)
 - **F5** — open the sort picker (depth / alphabetical / youngest blame / oldest blame)
+- **F6** — open the **search-scope** menu: toggle which sources a search covers — working tree, local branches, remote branches — plus a branch-name filter, a recency window, and a fetch-first toggle (see [Searching across branches](#searching-across-branches))
 
-  These three pickers are **session-only** — the choice applies until you quit and is never written to the config. To change the default for new sessions, use **F2 → edit the values → Save**.
+  These pickers (F3–F6) are **session-only** — the choice applies until you quit and is never written to the config. To change the default for new sessions, use **F2 → edit the values → Save**.
 - **F1** — show the full bindings list overlay (`?` is left free so it can be typed into the query — it's a glob wildcard and part of regex flags like `(?i)`)
-- **F2** — settings overlay: edit the per-session defaults (search mode / sensitivity / sorting) with ←/→ and **Save** them, edit the config file, or view the shipped reference. Save writes the defaults for *new* sessions and leaves the current one alone.
+- **F2** — settings overlay: edit the per-session defaults (search mode / sensitivity / sorting / scope) with ←/→ and **Save** them, edit the config file, or view the shipped reference. Save writes the defaults for *new* sessions and leaves the current one alone.
 - **Esc** — close any open overlay; with no overlay open, quit yoink (like Ctrl-C)
 - **Ctrl-C** — quit
 
@@ -182,6 +183,22 @@ Results list UX:
 - Occurrence count is shown once on the first occurrence line for each file
 - Inline occurrence rows include line number + snippet and preview jumps directly to that line
 
+## Searching across branches
+
+By default a search covers your working tree — the fast, familiar behavior.
+Press **F6** to open the scope menu and toggle on **local branches** and/or
+**remote branches**; then search as usual and yoink also greps those refs with
+`git grep <ref>` (nothing is checked out). Narrow the refs with a name **filter**
+(a glob like `jb/*` or `*redesign*`, matched as a substring so `origin/jb/*`
+counts) and a **timeframe** (`360h`, `14d`, `3w`, `1y`; empty = no limit), and
+turn **fetch all first** on/off. Branch hits are labeled with their ref and
+preview via `git show <ref>:<path>`. The scope is session-only; make it the
+default with **F2 → Save**.
+
+Headless, the same lives behind `--branches` (with `--branch-filter`, `--since`,
+`--ref <commit>`, `--no-fetch`, `--local-only`, and `--max-results` for
+early-stop) — see `yoink --help`.
+
 ## Optional shell helper so `yoink` can `cd`
 
 `yoink` prints a path; a process cannot directly change your current shell directory.
@@ -189,12 +206,12 @@ If you want `yoink` itself to change directory, add this shell function to your 
 
 ```bash
 yoink() {
-  # -o/--output, --help/--version, or piped stdout: run yoink directly so its
-  # output reaches you untouched. The cd-capture below is for the TUI only.
+  # -o/--output, --branches/--ref, --help/--version, or piped stdout: run yoink
+  # directly so its output reaches you untouched. The cd-capture below is for the TUI only.
   if [[ ! -t 1 ]]; then command yoink "$@"; return; fi
   local arg
   for arg in "$@"; do
-    case "$arg" in -o*|--output*|-h|--help|-V|--version) command yoink "$@"; return ;; esac
+    case "$arg" in -o*|--output*|--branches|--ref|--ref=*|-h|--help|-V|--version) command yoink "$@"; return ;; esac
   done
   local target
   target="$(command yoink "$@")" || return
@@ -227,13 +244,14 @@ markers and refreshed in place on repeat use (no duplicates).
 Sections in order:
 
 - **defaults** — `search_mode` (glob | regex), `case_sensitive` (true | false), `sort` (depth | alphabetical | blame_young | blame_old), `update_check` (true | false). These are the *new-session* defaults; **F2 → Save** writes them. The inline **F3 / F4 / F5** pickers override them for the current session only and never touch the file.
+- **search scope** — `scope_working_tree` (default `true`), `scope_local_branches`, `scope_remote_branches` (default `false`), `branch_filter` (glob), `branch_timeframe` (e.g. `14d`), `branch_fetch` (default `true`, only fires when remotes are in scope). The **F6** menu toggles these per session; **F2 → Save** persists them.
 - **walking** — `include_hidden`, `include_mounts`, `include_symlinks` (all `false` by default).
 - **ignored paths** — glob patterns, one per line. Default: `.git/**`, `node_modules/**`.
 - **keybinds** — `bind.<key> = <action>`. **Config-only**: a key has no behavior unless it's listed here, and that includes every `Ctrl-*` chord (no built-in defaults). Result actions: `cd`, `vim`, `vi`, `nano`, `cat`, `vscode`, `sublime`, `explorer`, `copy_path`, `copy_name`. Query-editing actions: `clear_query`, `delete_word`, `line_start`, `line_end`. If a key collides across binds (or with a built-in), the built-in — or else the first matching bind line — wins and the rest do nothing; yoink lists **every** such conflict in a startup warning.
 
-Built-in keys (↑/↓/PgUp/PgDn/Esc/F1/F2/F3/F4/F5/Ctrl-C) are always available and can't be rebound. `Enter` is reserved — it always runs the search. `?` is deliberately *not* a built-in key so it can be typed into the query (glob wildcard / regex `(?i)` flags).
+Built-in keys (↑/↓/PgUp/PgDn/Esc/F1/F2/F3/F4/F5/F6/Ctrl-C) are always available and can't be rebound. `Enter` is reserved — it always runs the search. `?` is deliberately *not* a built-in key so it can be typed into the query (glob wildcard / regex `(?i)` flags).
 
-The easiest way to change the persisted defaults is **F2 → Settings** inside the tool; the inline **F3 / F4 / F5** pickers change only the current session.
+The easiest way to change the persisted defaults is **F2 → Settings** inside the tool; the inline **F3 / F4 / F5 / F6** pickers change only the current session.
 
 ## Staying up to date
 

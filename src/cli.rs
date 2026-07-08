@@ -71,6 +71,39 @@ pub struct Cli {
     #[arg(long = "content-only")]
     pub content_only: bool,
 
+    /// Search across git branches instead of the working tree. Enumerates refs
+    /// newest-first and greps each with `git grep <ref>` — nothing is checked
+    /// out. Streams results as they're found; pair with --branch-filter,
+    /// --since, --ref, and --max-results.
+    #[arg(long = "branches")]
+    pub branches: bool,
+
+    /// Restrict the cross-branch search to refs whose name matches this glob
+    /// (e.g. 'jb/*'). Matched as a substring, so it also catches remote
+    /// branches like origin/jb/*. A commit hash here searches just that commit.
+    #[arg(long = "branch-filter", visible_alias = "branch", value_name = "GLOB")]
+    pub branch_filter: Option<String>,
+
+    /// Only search branches updated within this window: e.g. 360h, 14d, 3w, 1y
+    /// (units h/d/w/y, also mo; bare number = days). Omit or 'all' for no limit.
+    #[arg(long = "since", value_name = "SPEC")]
+    pub since: Option<String>,
+
+    /// Search a specific ref or commit (short or long hash). Repeatable. Skips
+    /// enumeration and the name/timeframe filters. Implies --branches.
+    #[arg(long = "ref", value_name = "COMMITISH")]
+    pub refs: Vec<String>,
+
+    /// Skip the `git fetch` that cross-branch search runs first (fetch is on by
+    /// default so teammates' pushed branches are found).
+    #[arg(long = "no-fetch")]
+    pub no_fetch: bool,
+
+    /// Cross-branch search: only local branches (refs/heads), not
+    /// remote-tracking refs.
+    #[arg(long = "local-only")]
+    pub local_only: bool,
+
     #[command(subcommand)]
     pub internal: Option<InternalCommand>,
 }
@@ -89,12 +122,22 @@ TUI — for scripts, pipes, or feeding an LLM. Each match carries the location p
   Quoting: single-quote the query so spaces, \", $, and regex survive (like rg).
   For a query starting with '-', use -q/--query or a '--' separator.
 
+BRANCH SEARCH (--branches): search other git branches without checking any out.
+Refs are enumerated newest-first and searched with `git grep <ref>`; hits stream
+to stdout (progress goes to stderr) so you can stop as soon as you see the match.
+Filter with --branch-filter 'jb/*', --since 30d, or target a commit with --ref.
+--max-results stops the search early (not just the output). Fetches remotes first
+unless --no-fetch. Shows the matched line only (no -C context in branch mode).
+
 EXAMPLES:
   yoink 'fn main(' -o markdown -m regex --max-results 30   # recommended
   yoink 'TODO' -o markdown -C 5 > todos.md                 # export to a file
   yoink 'parseConfig' -o json -s blame_young               # JSON, newest first
   yoink 'name = \"yoink\"' -o text -m regex                  # literal quotes
   yoink -q '-C' -m regex -o markdown                       # query starting '-'
+  yoink '__gtp_signed_out__' --branches --branch-filter 'jb/*' --since 30d
+  yoink 'signout' --branches -o jsonl --max-results 1      # stream, stop at 1
+  yoink 'signout' --ref 1b7c2113 -o text                   # search one commit
 ";
 
 /// Output format for headless (`--output`) runs.
